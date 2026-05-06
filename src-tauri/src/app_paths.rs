@@ -16,6 +16,18 @@ pub fn images_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
+pub fn debug_dir() -> Result<PathBuf, String> {
+    let dir = app_data_dir()?.join("debug");
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    Ok(dir)
+}
+
+pub fn generation_debug_dir(generation_id: &str) -> Result<PathBuf, String> {
+    let dir = debug_dir()?.join(generation_id);
+    std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    Ok(dir)
+}
+
 pub fn generation_image_dir(timestamp_ms: i64) -> Result<PathBuf, String> {
     let month = timestamp_ms / 1000 / 60 / 60 / 24 / 31;
     let dir = images_dir()?.join(format!("{month}"));

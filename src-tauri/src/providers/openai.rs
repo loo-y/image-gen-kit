@@ -1,3 +1,5 @@
+use std::io::Read;
+use std::path::Path;
 use std::time::Duration;
 
 use base64::{engine::general_purpose, Engine as _};
@@ -36,9 +38,21 @@ pub fn generate(
     };
 
     db::insert_generation(&generation)?;
-    match call_openai(&profile.profile.base_url, &api_key, &normalized)
-        .and_then(|response| persist_outputs(&generation.id, &normalized.output_format, response))
-    {
+    let debug_dir = if normalized.debug_mode {
+        Some(app_paths::generation_debug_dir(&generation.id)?)
+    } else {
+        None
+    };
+
+    let result = call_openai(
+        &profile.profile.base_url,
+        &api_key,
+        &normalized,
+        debug_dir.as_deref(),
+    )
+    .and_then(|response| persist_outputs(&generation.id, &normalized.output_format, response));
+
+    match result {
         Ok((outputs, revised_prompt)) => {
             let completed_at = crate::commands::now_millis();
             db::update_generation_success(&generation.id, revised_prompt.as_deref(), completed_at)?;
@@ -52,6 +66,7 @@ pub fn generate(
                 })
         }
         Err(err) => {
+            let err = append_debug_path(err, debug_dir.as_deref());
             let _ =
                 db::update_generation_failed(&generation.id, &err, crate::commands::now_millis());
             Err(err)
@@ -63,9 +78,23 @@ fn call_openai(
     base_url: &str,
     api_key: &str,
     normalized: &NormalizedRequest,
+    debug_dir: Option<&Path>,
 ) -> Result<OpenAiImageResponse, String> {
     let url = image_generation_url(base_url)?;
     let payload = serde_json::to_string(&normalized.params).map_err(|err| err.to_string())?;
+    write_debug_json(
+        debug_dir,
+        "request.json",
+        &json!({
+            "method": "POST",
+            "url": url,
+            "headers": {
+                "authorization": "Bearer <redacted>",
+                "content-type": "application/json"
+            },
+            "body": normalized.params
+        }),
+    );
     let response = ureq::post(&url)
         .set("Authorization", &format!("Bearer {api_key}"))
         .set("Content-Type", "application/json")
@@ -73,15 +102,24 @@ fn call_openai(
         .send_string(&payload);
 
     let body = match response {
-        Ok(response) => response.into_string().map_err(|err| err.to_string())?,
+        Ok(response) => {
+            let status = response.status();
+            let body = response.into_string().map_err(|err| err.to_string())?;
+            write_debug_response(debug_dir, "response", status, &body);
+            body
+        }
         Err(ureq::Error::Status(code, response)) => {
             let body = response.into_string().unwrap_or_default();
+            write_debug_response(debug_dir, "http-error-response", code, &body);
             return Err(format!(
                 "Image API returned {code}: {}",
                 api_error_message(&body)
             ));
         }
-        Err(ureq::Error::Transport(err)) => return Err(format!("Image API request failed: {err}")),
+        Err(ureq::Error::Transport(err)) => {
+            write_debug_text(debug_dir, "transport-error.txt", &err.to_string());
+            return Err(format!("Image API request failed: {err}"));
+        }
     };
 
     parse_image_response(&body)
@@ -99,27 +137,26 @@ fn persist_outputs(
     let mut outputs = Vec::new();
     let now = crate::commands::now_millis();
     let dir = app_paths::generation_image_dir(now)?;
-    let extension = extension_for_format(output_format);
     let revised_prompt = response
         .data
         .iter()
         .find_map(|item| item.revised_prompt.clone());
 
     for (index, item) in response.data.into_iter().enumerate() {
-        let image_base64 = item
-            .b64_json
-            .ok_or_else(|| "Image API response item did not include b64_json".to_string())?;
-        let bytes = general_purpose::STANDARD
-            .decode(image_base64)
-            .map_err(|err| format!("Image API returned invalid base64: {err}"))?;
-        let path = dir.join(format!("{generation_id}-{index}.{extension}"));
+        let payload = item.payload.ok_or_else(|| {
+            "Image API response item did not include b64_json, url, base64, image, or another supported image field".to_string()
+        })?;
+        let (bytes, detected_format) = image_bytes_from_payload(payload)?;
+        let item_format = detected_format.unwrap_or_else(|| output_format.to_string());
+        let item_extension = extension_for_format(&item_format);
+        let path = dir.join(format!("{generation_id}-{index}.{item_extension}"));
         std::fs::write(&path, &bytes).map_err(|err| err.to_string())?;
-        let (width, height) = read_dimensions(&bytes, output_format);
+        let (width, height) = read_dimensions(&bytes, &item_format);
         let output = GenerationOutput {
             id: 0,
             generation_id: generation_id.to_string(),
             path: path.to_string_lossy().to_string(),
-            format: output_format.to_string(),
+            format: item_format,
             width,
             height,
             file_size: bytes.len() as i64,
@@ -162,18 +199,20 @@ fn api_error_message(body: &str) -> String {
 fn parse_image_response(body: &str) -> Result<OpenAiImageResponse, String> {
     let value: Value = serde_json::from_str(body)
         .map_err(|err| format!("Image API returned a response that was not valid JSON: {err}"))?;
-    let data = value
-        .get("data")
-        .and_then(|data| data.as_array())
-        .ok_or_else(|| "Image API response did not include a data array".to_string())?
-        .iter()
+    let items = response_items(&value);
+    if items.is_empty() {
+        return Err(
+            "Image API response did not include data, images, output, or a top-level image field"
+                .to_string(),
+        );
+    }
+    let data = items
+        .into_iter()
         .map(|item| OpenAiImageItem {
-            b64_json: item
-                .get("b64_json")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string),
+            payload: image_payload_from_value(item),
             revised_prompt: item
                 .get("revised_prompt")
+                .or_else(|| item.get("revisedPrompt"))
                 .and_then(|value| value.as_str())
                 .map(ToString::to_string),
         })
@@ -186,8 +225,13 @@ struct OpenAiImageResponse {
 }
 
 struct OpenAiImageItem {
-    b64_json: Option<String>,
+    payload: Option<ImagePayload>,
     revised_prompt: Option<String>,
+}
+
+enum ImagePayload {
+    Base64(String),
+    Url(String),
 }
 
 struct NormalizedRequest {
@@ -196,6 +240,7 @@ struct NormalizedRequest {
     size: String,
     quality: String,
     output_format: String,
+    debug_mode: bool,
     params: Value,
 }
 
@@ -228,9 +273,181 @@ impl NormalizedRequest {
             size,
             quality,
             output_format,
+            debug_mode: request.debug_mode.unwrap_or(false),
             params,
         })
     }
+}
+
+fn response_items(value: &Value) -> Vec<&Value> {
+    for key in ["data", "images", "output", "outputs", "result", "results"] {
+        if let Some(found) = value.get(key) {
+            if let Some(items) = values_as_items(found) {
+                return items;
+            }
+        }
+    }
+
+    if image_payload_from_value(value).is_some() {
+        vec![value]
+    } else {
+        Vec::new()
+    }
+}
+
+fn values_as_items(value: &Value) -> Option<Vec<&Value>> {
+    if let Some(items) = value.as_array() {
+        return Some(items.iter().collect());
+    }
+    if value.is_object() {
+        return Some(vec![value]);
+    }
+    None
+}
+
+fn image_payload_from_value(value: &Value) -> Option<ImagePayload> {
+    if let Some(text) = value.as_str() {
+        return image_payload_from_string(text, false);
+    }
+
+    let object = value.as_object()?;
+    for key in [
+        "b64_json",
+        "base64",
+        "b64",
+        "image_base64",
+        "imageBase64",
+        "image",
+        "data",
+        "result",
+    ] {
+        if let Some(text) = object.get(key).and_then(|value| value.as_str()) {
+            if let Some(payload) = image_payload_from_string(text, true) {
+                return Some(payload);
+            }
+        }
+    }
+
+    for key in ["url", "image_url", "imageUrl", "output_url", "outputUrl"] {
+        if let Some(value) = object.get(key) {
+            if let Some(text) = value.as_str() {
+                if let Some(payload) = image_payload_from_string(text, false) {
+                    return Some(payload);
+                }
+            }
+            if let Some(text) = value.get("url").and_then(|value| value.as_str()) {
+                if let Some(payload) = image_payload_from_string(text, false) {
+                    return Some(payload);
+                }
+            }
+        }
+    }
+
+    for key in ["image", "content", "message"] {
+        if let Some(value) = object.get(key) {
+            if let Some(payload) = image_payload_from_value(value) {
+                return Some(payload);
+            }
+            if let Some(items) = value.as_array() {
+                for item in items {
+                    if let Some(payload) = image_payload_from_value(item) {
+                        return Some(payload);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn image_payload_from_string(value: &str, trust_base64: bool) -> Option<ImagePayload> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        return Some(ImagePayload::Url(value.to_string()));
+    }
+    if value.starts_with("data:image/") {
+        return Some(ImagePayload::Base64(value.to_string()));
+    }
+    if trust_base64 || decodes_to_known_image(value) {
+        return Some(ImagePayload::Base64(value.to_string()));
+    }
+    None
+}
+
+fn image_bytes_from_payload(payload: ImagePayload) -> Result<(Vec<u8>, Option<String>), String> {
+    match payload {
+        ImagePayload::Base64(value) => {
+            let format = format_from_data_url(&value);
+            let bytes = decode_image_base64(&value)?;
+            let detected = infer_format_from_bytes(&bytes)
+                .map(ToString::to_string)
+                .or(format);
+            Ok((bytes, detected))
+        }
+        ImagePayload::Url(url) => download_image(&url),
+    }
+}
+
+fn decode_image_base64(value: &str) -> Result<Vec<u8>, String> {
+    let base64_value = strip_data_url_prefix(value).replace(['\n', '\r', ' ', '\t'], "");
+    general_purpose::STANDARD
+        .decode(&base64_value)
+        .or_else(|_| general_purpose::STANDARD_NO_PAD.decode(&base64_value))
+        .map_err(|err| format!("Image API returned invalid base64 image data: {err}"))
+}
+
+fn strip_data_url_prefix(value: &str) -> &str {
+    if value.starts_with("data:image/") {
+        value.split_once(',').map(|(_, data)| data).unwrap_or(value)
+    } else if value.starts_with("data:") {
+        value.split_once(',').map(|(_, data)| data).unwrap_or(value)
+    } else {
+        value
+    }
+}
+
+fn format_from_data_url(value: &str) -> Option<String> {
+    if !value.starts_with("data:image/") {
+        return None;
+    }
+    let mime = value.split_once(';')?.0;
+    Some(normalize_format(mime.strip_prefix("data:image/")?))
+}
+
+fn decodes_to_known_image(value: &str) -> bool {
+    decode_image_base64(value)
+        .ok()
+        .and_then(|bytes| infer_format_from_bytes(&bytes).map(ToString::to_string))
+        .is_some()
+}
+
+fn download_image(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
+    let response = ureq::get(url)
+        .timeout(Duration::from_secs(180))
+        .call()
+        .map_err(|err| format!("Unable to download image URL returned by API: {err}"))?;
+    let content_type = response.header("content-type").map(ToString::to_string);
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .map_err(|err| format!("Unable to read image URL returned by API: {err}"))?;
+    if bytes.is_empty() {
+        return Err("Image URL returned by API downloaded an empty body".to_string());
+    }
+    let detected = infer_format_from_bytes(&bytes)
+        .map(ToString::to_string)
+        .or_else(|| {
+            content_type
+                .as_deref()
+                .and_then(|value| value.strip_prefix("image/"))
+                .map(normalize_format)
+        });
+    Ok((bytes, detected))
 }
 
 fn required_trimmed(value: &str, label: &str) -> Result<String, String> {
@@ -315,16 +532,80 @@ fn validate_compression(value: Option<i64>, output_format: &str) -> Result<Optio
     Ok(Some(value))
 }
 
+fn append_debug_path(message: String, debug_dir: Option<&Path>) -> String {
+    match debug_dir {
+        Some(debug_dir) => format!("{message}. Debug files: {}", debug_dir.display()),
+        None => message,
+    }
+}
+
+fn write_debug_json(debug_dir: Option<&Path>, file_name: &str, value: &Value) {
+    let Some(debug_dir) = debug_dir else {
+        return;
+    };
+    let Ok(content) = serde_json::to_string_pretty(value) else {
+        return;
+    };
+    let _ = std::fs::write(debug_dir.join(file_name), content);
+}
+
+fn write_debug_response(debug_dir: Option<&Path>, prefix: &str, status: u16, body: &str) {
+    let Some(debug_dir) = debug_dir else {
+        return;
+    };
+    let _ = std::fs::write(debug_dir.join(format!("{prefix}.txt")), body);
+    if let Ok(value) = serde_json::from_str::<Value>(body) {
+        write_debug_json(debug_dir.into(), &format!("{prefix}.json"), &value);
+    }
+    let _ = std::fs::write(
+        debug_dir.join(format!("{prefix}-status.txt")),
+        status.to_string(),
+    );
+}
+
+fn write_debug_text(debug_dir: Option<&Path>, file_name: &str, value: &str) {
+    let Some(debug_dir) = debug_dir else {
+        return;
+    };
+    let _ = std::fs::write(debug_dir.join(file_name), value);
+}
+
 fn extension_for_format(output_format: &str) -> &'static str {
-    match output_format {
+    match normalize_format(output_format).as_str() {
         "jpeg" => "jpg",
         "webp" => "webp",
         _ => "png",
     }
 }
 
+fn normalize_format(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "jpg" | "jpeg" | "pjpeg" => "jpeg".to_string(),
+        "webp" => "webp".to_string(),
+        "png" | "x-png" => "png".to_string(),
+        "gif" => "gif".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn infer_format_from_bytes(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some("png");
+    }
+    if bytes.len() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff {
+        return Some("jpeg");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+    if bytes.len() >= 6 && (&bytes[0..6] == b"GIF87a" || &bytes[0..6] == b"GIF89a") {
+        return Some("gif");
+    }
+    None
+}
+
 fn read_dimensions(bytes: &[u8], output_format: &str) -> (Option<i64>, Option<i64>) {
-    match output_format {
+    match normalize_format(output_format).as_str() {
         "png" => read_png_dimensions(bytes),
         "jpeg" => read_jpeg_dimensions(bytes),
         _ => (None, None),
@@ -388,7 +669,7 @@ fn read_jpeg_dimensions(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_generation_url, validate_size};
+    use super::{image_generation_url, parse_image_response, validate_size, ImagePayload};
 
     #[test]
     fn accepts_openai_size_constraints() {
@@ -413,5 +694,31 @@ mod tests {
             image_generation_url("https://example.test/v1/images/generations").unwrap(),
             "https://example.test/v1/images/generations"
         );
+    }
+
+    #[test]
+    fn parses_url_image_response_from_compatible_provider() {
+        let parsed = parse_image_response(
+            r#"{"data":[{"url":"https://cdn.example.test/image.png","revised_prompt":"ok"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.data.len(), 1);
+        assert_eq!(parsed.data[0].revised_prompt.as_deref(), Some("ok"));
+        assert!(matches!(
+            parsed.data[0].payload,
+            Some(ImagePayload::Url(ref url)) if url == "https://cdn.example.test/image.png"
+        ));
+    }
+
+    #[test]
+    fn parses_nonstandard_base64_image_field() {
+        let parsed =
+            parse_image_response(r#"{"images":[{"image":"data:image/png;base64,iVBORw0KGgo="}]}"#)
+                .unwrap();
+        assert_eq!(parsed.data.len(), 1);
+        assert!(matches!(
+            parsed.data[0].payload,
+            Some(ImagePayload::Base64(_))
+        ));
     }
 }

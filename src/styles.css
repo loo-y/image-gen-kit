@@ -224,6 +224,17 @@ select:focus {
   font-size: 13px;
 }
 
+.debugRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #e2d9cd;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 10px;
+}
+
 .primaryButton,
 .secondaryButton,
 .dangerButton {

@@ -94,6 +94,7 @@ pub struct GenerateImageRequest {
     pub output_format: String,
     pub output_compression: Option<i64>,
     pub moderation: Option<String>,
+    pub debug_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone)]

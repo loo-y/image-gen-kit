@@ -112,6 +112,12 @@ pub fn reveal_image(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn reveal_debug_dir() -> Result<(), String> {
+    let path = app_paths::debug_dir()?;
+    reveal_path(&path)
+}
+
+#[tauri::command]
 pub fn delete_generation(id: String) -> Result<(), String> {
     let paths = db::delete_generation(&id)?;
     for path in paths {

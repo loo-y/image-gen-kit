@@ -23,6 +23,7 @@ pub fn run() {
             commands::generate_image,
             commands::read_image_data_url,
             commands::reveal_image,
+            commands::reveal_debug_dir,
             commands::delete_generation
         ])
         .run(tauri::generate_context!())

@@ -73,6 +73,7 @@ export default function App() {
   const [outputFormat, setOutputFormat] = useState("png");
   const [outputCompression, setOutputCompression] = useState(90);
   const [moderation, setModeration] = useState("auto");
+  const [debugMode, setDebugMode] = useState(false);
   const [history, setHistory] = useState<GenerationDetail[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
@@ -220,6 +221,7 @@ export default function App() {
           outputFormat,
           outputCompression: compressionEnabled ? outputCompression : null,
           moderation,
+          debugMode,
         },
       });
       setSelected(detail);
@@ -271,6 +273,10 @@ export default function App() {
     const path = selected?.outputs[0]?.path;
     if (!path) return;
     await invoke("reveal_image", { path });
+  }
+
+  async function revealDebugDirectory() {
+    await invoke("reveal_debug_dir");
   }
 
   async function deleteGeneration(id: string) {
@@ -465,6 +471,20 @@ export default function App() {
                     ))}
                   </select>
                 </Field>
+              </div>
+
+              <div className="debugRow">
+                <label className="checkRow">
+                  <input
+                    type="checkbox"
+                    checked={debugMode}
+                    onChange={(event) => setDebugMode(event.target.checked)}
+                  />
+                  <span>Debug mode</span>
+                </label>
+                <button className="secondaryButton" onClick={revealDebugDirectory}>
+                  Debug files
+                </button>
               </div>
 
               <div className="runRow">
