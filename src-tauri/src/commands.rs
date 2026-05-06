@@ -11,7 +11,7 @@ use crate::providers::openai;
 use crate::secrets;
 use crate::types::{
     AppBootstrap, GenerateImageRequest, GenerationDetail, ListGenerationsRequest, ProviderProfile,
-    SaveProviderProfileRequest,
+    SaveProviderProfileRequest, StartedGeneration,
 };
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -91,6 +91,27 @@ pub async fn generate_image(request: GenerateImageRequest) -> Result<GenerationD
 }
 
 #[tauri::command]
+pub async fn start_generation(request: GenerateImageRequest) -> Result<StartedGeneration, String> {
+    let job = prepare_openai_job(request)?;
+    let generation_id = job.generation.id.clone();
+    let generation = job.generation.clone();
+    db::insert_generation(&generation)?;
+    let initial = GenerationDetail {
+        generation,
+        outputs: Vec::new(),
+    };
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let _ = openai::run_existing_job(job);
+    });
+
+    Ok(StartedGeneration {
+        generation_id,
+        generation: initial,
+    })
+}
+
+#[tauri::command]
 pub fn read_image_data_url(path: String) -> Result<String, String> {
     let path = app_paths::ensure_path_in_images_dir(Path::new(&path))?;
     let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
@@ -109,6 +130,18 @@ pub fn read_image_data_url(path: String) -> Result<String, String> {
 pub fn reveal_image(path: String) -> Result<(), String> {
     let path = app_paths::ensure_path_in_images_dir(Path::new(&path))?;
     reveal_path(&path)
+}
+
+#[tauri::command]
+pub fn open_image(path: String) -> Result<(), String> {
+    let path = app_paths::ensure_path_in_images_dir(Path::new(&path))?;
+    open_path(&path)
+}
+
+#[tauri::command]
+pub fn open_images_dir() -> Result<(), String> {
+    let path = app_paths::images_dir()?;
+    open_path(&path)
 }
 
 #[tauri::command]
@@ -142,6 +175,11 @@ pub fn make_id(prefix: &str) -> String {
 }
 
 fn generate_image_blocking(request: GenerateImageRequest) -> Result<GenerationDetail, String> {
+    let job = prepare_openai_job(request)?;
+    openai::run_job(job)
+}
+
+fn prepare_openai_job(request: GenerateImageRequest) -> Result<openai::OpenAiJob, String> {
     let mut profile = db::get_profile(&request.provider_id)?
         .or_else(|| db::first_profile().ok())
         .ok_or_else(|| "Provider profile was not found".to_string())?;
@@ -167,7 +205,7 @@ fn generate_image_blocking(request: GenerateImageRequest) -> Result<GenerationDe
     };
 
     match profile.profile.provider_type.as_str() {
-        "openai" => openai::generate(request, profile, api_key),
+        "openai" => openai::create_job(request, profile, api_key),
         other => Err(format!("Provider type '{other}' is not implemented yet")),
     }
 }
@@ -196,5 +234,31 @@ fn reveal_path(path: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err("Unable to reveal image in the file manager".to_string())
+    }
+}
+
+fn open_path(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    let status = Command::new("open")
+        .arg(path)
+        .status()
+        .map_err(|err| err.to_string())?;
+
+    #[cfg(target_os = "windows")]
+    let status = Command::new("cmd")
+        .args(["/C", "start", "", &path.to_string_lossy()])
+        .status()
+        .map_err(|err| err.to_string())?;
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let status = Command::new("xdg-open")
+        .arg(path)
+        .status()
+        .map_err(|err| err.to_string())?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err("Unable to open path".to_string())
     }
 }

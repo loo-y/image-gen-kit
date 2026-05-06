@@ -361,9 +361,9 @@ select:focus {
 }
 
 .galleryToolbar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(260px, 420px) auto;
   align-items: center;
-  justify-content: space-between;
   gap: 18px;
 }
 
@@ -379,7 +379,7 @@ select:focus {
 }
 
 .galleryToolbar input {
-  width: min(420px, 45vw);
+  width: 100%;
   min-height: 40px;
   border: 1px solid #d4cbbd;
   border-radius: 8px;
@@ -428,7 +428,7 @@ select:focus {
 .galleryPreview img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .galleryPlaceholder {
@@ -460,14 +460,14 @@ select:focus {
 
 .galleryPrompt {
   display: -webkit-box;
-  min-height: 42px;
+  min-height: 54px;
   margin: 0;
   overflow: hidden;
   color: #1f1d1a;
   font-size: 13px;
   font-weight: 800;
   line-height: 1.35;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
 }
 
@@ -533,6 +533,79 @@ select:focus {
   min-height: 260px;
   color: #887f72;
   font-weight: 800;
+}
+
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(20, 19, 17, 0.72);
+}
+
+.imageModal {
+  display: flex;
+  flex-direction: column;
+  width: min(1040px, 92vw);
+  max-height: 92vh;
+  overflow: hidden;
+  border: 1px solid #d6cec0;
+  border-radius: 8px;
+  background: #f8f5ee;
+}
+
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #ded5c8;
+}
+
+.modalHeader h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.modalHeader p {
+  margin: 5px 0 0;
+  color: #706b61;
+  font-size: 13px;
+}
+
+.modalActions {
+  display: flex;
+  gap: 8px;
+}
+
+.modalImageWrap {
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  flex: 1;
+  background: #1f1d1a;
+  padding: 14px;
+}
+
+.modalImageWrap img {
+  display: block;
+  max-width: 100%;
+  max-height: 68vh;
+  object-fit: contain;
+}
+
+.modalPrompt {
+  display: -webkit-box;
+  margin: 0;
+  padding: 12px 16px;
+  overflow: hidden;
+  color: #3b3731;
+  line-height: 1.4;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 
 .inspector {
@@ -696,8 +769,8 @@ dd {
   }
 
   .galleryToolbar {
+    grid-template-columns: 1fr;
     align-items: stretch;
-    flex-direction: column;
   }
 
   .galleryToolbar input {

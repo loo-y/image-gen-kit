@@ -21,8 +21,11 @@ pub fn run() {
             commands::list_generations,
             commands::get_generation,
             commands::generate_image,
+            commands::start_generation,
             commands::read_image_data_url,
             commands::reveal_image,
+            commands::open_image,
+            commands::open_images_dir,
             commands::reveal_debug_dir,
             commands::delete_generation
         ])

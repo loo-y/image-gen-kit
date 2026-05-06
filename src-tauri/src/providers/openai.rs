@@ -11,11 +11,21 @@ use crate::types::{
     GenerateImageRequest, Generation, GenerationDetail, GenerationOutput, StoredProviderProfile,
 };
 
-pub fn generate(
+const IMAGE_API_TIMEOUT_SECONDS: u64 = 900;
+
+pub struct OpenAiJob {
+    pub generation: Generation,
+    pub base_url: String,
+    pub api_key: String,
+    pub debug_mode: bool,
+    pub params: Value,
+}
+
+pub fn create_job(
     request: GenerateImageRequest,
     profile: StoredProviderProfile,
     api_key: String,
-) -> Result<GenerationDetail, String> {
+) -> Result<OpenAiJob, String> {
     let normalized = NormalizedRequest::from_request(request)?;
     let now = crate::commands::now_millis();
     let params_json = serde_json::to_string(&normalized.params).map_err(|err| err.to_string())?;
@@ -37,7 +47,33 @@ pub fn generate(
         completed_at: None,
     };
 
-    db::insert_generation(&generation)?;
+    Ok(OpenAiJob {
+        generation,
+        base_url: profile.profile.base_url,
+        api_key,
+        debug_mode: normalized.debug_mode,
+        params: normalized.params,
+    })
+}
+
+pub fn run_job(job: OpenAiJob) -> Result<GenerationDetail, String> {
+    run_job_inner(job, true)
+}
+
+pub fn run_existing_job(job: OpenAiJob) -> Result<GenerationDetail, String> {
+    run_job_inner(job, false)
+}
+
+fn run_job_inner(job: OpenAiJob, insert_generation: bool) -> Result<GenerationDetail, String> {
+    let normalized = NormalizedJob {
+        output_format: job.generation.output_format.clone(),
+        debug_mode: job.debug_mode,
+        params: job.params,
+    };
+    let generation = job.generation;
+    if insert_generation {
+        db::insert_generation(&generation)?;
+    }
     let debug_dir = if normalized.debug_mode {
         Some(app_paths::generation_debug_dir(&generation.id)?)
     } else {
@@ -45,8 +81,8 @@ pub fn generate(
     };
 
     let result = call_openai(
-        &profile.profile.base_url,
-        &api_key,
+        &job.base_url,
+        &job.api_key,
         &normalized,
         debug_dir.as_deref(),
     )
@@ -77,7 +113,7 @@ pub fn generate(
 fn call_openai(
     base_url: &str,
     api_key: &str,
-    normalized: &NormalizedRequest,
+    normalized: &NormalizedJob,
     debug_dir: Option<&Path>,
 ) -> Result<OpenAiImageResponse, String> {
     let url = image_generation_url(base_url)?;
@@ -98,7 +134,7 @@ fn call_openai(
     let response = ureq::post(&url)
         .set("Authorization", &format!("Bearer {api_key}"))
         .set("Content-Type", "application/json")
-        .timeout(Duration::from_secs(180))
+        .timeout(Duration::from_secs(IMAGE_API_TIMEOUT_SECONDS))
         .send_string(&payload);
 
     let body = match response {
@@ -239,6 +275,12 @@ struct NormalizedRequest {
     prompt: String,
     size: String,
     quality: String,
+    output_format: String,
+    debug_mode: bool,
+    params: Value,
+}
+
+struct NormalizedJob {
     output_format: String,
     debug_mode: bool,
     params: Value,
@@ -427,7 +469,7 @@ fn decodes_to_known_image(value: &str) -> bool {
 
 fn download_image(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
     let response = ureq::get(url)
-        .timeout(Duration::from_secs(180))
+        .timeout(Duration::from_secs(IMAGE_API_TIMEOUT_SECONDS))
         .call()
         .map_err(|err| format!("Unable to download image URL returned by API: {err}"))?;
     let content_type = response.header("content-type").map(ToString::to_string);

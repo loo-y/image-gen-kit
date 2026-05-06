@@ -62,7 +62,14 @@ pub fn init_database() -> Result<(), String> {
 
 pub fn open() -> Result<Connection, String> {
     let path = app_paths::database_path()?;
-    Connection::open(&path)
+    let db = Connection::open(&path)?;
+    db.execute(
+        r#"
+        PRAGMA busy_timeout = 10000;
+        PRAGMA foreign_keys = ON;
+        "#,
+    )?;
+    Ok(db)
 }
 
 pub fn list_profiles() -> Result<Vec<ProviderProfile>, String> {

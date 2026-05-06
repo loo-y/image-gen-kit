@@ -73,6 +73,13 @@ pub struct GenerationDetail {
     pub outputs: Vec<GenerationOutput>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartedGeneration {
+    pub generation_id: String,
+    pub generation: GenerationDetail,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListGenerationsRequest {

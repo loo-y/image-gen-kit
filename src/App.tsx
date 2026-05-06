@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type ProviderProfile = {
@@ -52,10 +52,17 @@ type AppBootstrap = {
   generations: GenerationDetail[];
 };
 
+type StartedGeneration = {
+  generationId: string;
+  generation: GenerationDetail;
+};
+
 const sizes = ["auto", "1024x1024", "1536x1024", "1024x1536", "custom"];
 const qualities = ["auto", "low", "medium", "high"];
 const formats = ["png", "jpeg", "webp"];
 const moderationModes = ["auto", "low"];
+const generationPollIntervalMs = 2500;
+const generationPollAttempts = 400;
 
 export default function App() {
   const [profiles, setProfiles] = useState<ProviderProfile[]>([]);
@@ -79,6 +86,7 @@ export default function App() {
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<GenerationDetail | null>(null);
   const [imageDataUrl, setImageDataUrl] = useState("");
+  const [previewImage, setPreviewImage] = useState<{ detail: GenerationDetail; dataUrl: string } | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [error, setError] = useState("");
@@ -91,10 +99,15 @@ export default function App() {
 
   const selectedSize = size === "custom" ? `${customWidth}x${customHeight}` : size;
   const compressionEnabled = outputFormat === "jpeg" || outputFormat === "webp";
+  const selectedIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     void bootstrap();
   }, []);
+
+  useEffect(() => {
+    selectedIdRef.current = selected?.generation.id ?? null;
+  }, [selected]);
 
   useEffect(() => {
     if (!activeProfile) return;
@@ -138,6 +151,17 @@ export default function App() {
       cancelled = true;
     };
   }, [activeView, history, thumbnailUrls]);
+
+  useEffect(() => {
+    const hasRunning = history.some((detail) => detail.generation.status === "running");
+    if (!hasRunning) return;
+
+    const timer = window.setInterval(() => {
+      void refreshHistory();
+    }, 2500);
+
+    return () => window.clearInterval(timer);
+  }, [history, historyQuery]);
 
   async function bootstrap() {
     try {
@@ -209,7 +233,7 @@ export default function App() {
         const profile = await saveProfile();
         profileId = profile.id;
       }
-      const detail = await invoke<GenerationDetail>("generate_image", {
+      const started = await invoke<StartedGeneration>("start_generation", {
         request: {
           providerId: profileId,
           apiKeyOverride: apiKey,
@@ -224,16 +248,42 @@ export default function App() {
           debugMode,
         },
       });
-      setSelected(detail);
-      await loadPreview(detail);
-      await refreshHistory();
-      setActiveView("generate");
-      setNotice("Image generated");
+      setHistory((current) => [started.generation, ...current.filter((item) => item.generation.id !== started.generationId)]);
+      setSelected(started.generation);
+      setImageDataUrl("");
+      setNotice("Generation started");
+      void pollGeneration(started.generationId);
     } catch (err) {
       setError(errorMessage(err));
       await refreshHistory().catch(() => undefined);
     } finally {
       setIsGenerating(false);
+    }
+  }
+
+  async function pollGeneration(id: string) {
+    for (let attempt = 0; attempt < generationPollAttempts; attempt += 1) {
+      await wait(generationPollIntervalMs);
+      try {
+        const detail = await invoke<GenerationDetail | null>("get_generation", { id });
+        if (!detail) continue;
+        setHistory((current) => [detail, ...current.filter((item) => item.generation.id !== id)]);
+        setSelected((current) => (current?.generation.id === id ? detail : current));
+        if (detail.generation.status !== "running") {
+          if (detail.generation.status === "succeeded") {
+            if (selectedIdRef.current === id) {
+              setSelected(detail);
+              await loadPreview(detail);
+            }
+            setNotice("Image generated");
+          } else if (detail.generation.errorMessage) {
+            setError(detail.generation.errorMessage);
+          }
+          return;
+        }
+      } catch {
+        return;
+      }
     }
   }
 
@@ -293,6 +343,24 @@ export default function App() {
     const path = detail.outputs[0]?.path;
     if (!path) return;
     await invoke("reveal_image", { path });
+  }
+
+  async function openGeneration(detail: GenerationDetail) {
+    const path = detail.outputs[0]?.path;
+    if (!path) return;
+    await invoke("open_image", { path });
+  }
+
+  async function openImagesDirectory() {
+    await invoke("open_images_dir");
+  }
+
+  async function previewGeneration(detail: GenerationDetail) {
+    await selectGeneration(detail);
+    const first = detail.outputs[0];
+    if (!first) return;
+    const dataUrl = await invoke<string>("read_image_data_url", { path: first.path });
+    setPreviewImage({ detail, dataUrl });
   }
 
   async function useGeneration(detail: GenerationDetail) {
@@ -379,8 +447,11 @@ export default function App() {
             selectedId={selected?.generation.id}
             onQuery={onHistorySearch}
             onSelect={selectGeneration}
+            onPreview={previewGeneration}
+            onOpen={openGeneration}
             onUse={useGeneration}
             onReveal={revealGeneration}
+            onOpenFolder={openImagesDirectory}
             onDelete={deleteGeneration}
           />
         ) : (
@@ -506,10 +577,20 @@ export default function App() {
             <Inspector
               detail={selected}
               imageDataUrl={imageDataUrl}
+              onOpen={() => selected && openGeneration(selected)}
               onReveal={revealSelected}
               onDelete={deleteSelected}
             />
           </div>
+        )}
+        {previewImage && (
+          <ImagePreviewModal
+            detail={previewImage.detail}
+            dataUrl={previewImage.dataUrl}
+            onClose={() => setPreviewImage(null)}
+            onOpen={() => openGeneration(previewImage.detail)}
+            onReveal={() => revealGeneration(previewImage.detail)}
+          />
         )}
       </section>
     </main>
@@ -523,8 +604,11 @@ function GalleryHistoryView(props: {
   selectedId?: string;
   onQuery: (value: string) => void;
   onSelect: (detail: GenerationDetail) => void;
+  onPreview: (detail: GenerationDetail) => void;
+  onOpen: (detail: GenerationDetail) => void;
   onUse: (detail: GenerationDetail) => void;
   onReveal: (detail: GenerationDetail) => void;
+  onOpenFolder: () => void;
   onDelete: (id: string) => void;
 }) {
   return (
@@ -539,6 +623,9 @@ function GalleryHistoryView(props: {
           placeholder="Search prompt, model, provider"
           onChange={(event) => props.onQuery(event.target.value)}
         />
+        <button className="secondaryButton" onClick={props.onOpenFolder}>
+          Image folder
+        </button>
       </div>
 
       <div className="galleryGrid">
@@ -550,12 +637,12 @@ function GalleryHistoryView(props: {
               key={detail.generation.id}
               className={props.selectedId === detail.generation.id ? "galleryCard selected" : "galleryCard"}
             >
-              <button className="galleryPreview" onClick={() => props.onSelect(detail)}>
+              <button className="galleryPreview" onClick={() => (output ? props.onPreview(detail) : props.onSelect(detail))}>
                 {thumbnail ? (
                   <img src={thumbnail} alt="Generated output thumbnail" />
                 ) : (
                   <span className={`galleryPlaceholder ${detail.generation.status}`}>
-                    {detail.generation.status}
+                    {displayStatus(detail.generation.status)}
                   </span>
                 )}
               </button>
@@ -570,6 +657,12 @@ function GalleryHistoryView(props: {
                   <p className="galleryError">{detail.generation.errorMessage}</p>
                 )}
                 <div className="galleryActions">
+                  <button className="smallButton" onClick={() => props.onPreview(detail)} disabled={!output}>
+                    Preview
+                  </button>
+                  <button className="smallButton" onClick={() => props.onOpen(detail)} disabled={!output}>
+                    Open
+                  </button>
                   <button className="smallButton" onClick={() => props.onUse(detail)}>
                     Use
                   </button>
@@ -662,7 +755,7 @@ function HistoryView(props: {
             <span className={`statusDot ${detail.generation.status}`} />
             <span className="historyText">
               <strong>{detail.generation.prompt || "Untitled prompt"}</strong>
-              <small>{detail.generation.model} · {formatTime(detail.generation.createdAt)}</small>
+              <small>{detail.generation.model} · {displayStatus(detail.generation.status)} · {formatTime(detail.generation.createdAt)}</small>
             </span>
           </button>
         ))}
@@ -672,9 +765,46 @@ function HistoryView(props: {
   );
 }
 
+function ImagePreviewModal(props: {
+  detail: GenerationDetail;
+  dataUrl: string;
+  onClose: () => void;
+  onOpen: () => void;
+  onReveal: () => void;
+}) {
+  return (
+    <div className="modalOverlay" onClick={props.onClose}>
+      <section className="imageModal" onClick={(event) => event.stopPropagation()}>
+        <header className="modalHeader">
+          <div>
+            <h2>Preview</h2>
+            <p>{props.detail.generation.model} · {props.detail.generation.size}</p>
+          </div>
+          <div className="modalActions">
+            <button className="secondaryButton" onClick={props.onOpen}>
+              Open
+            </button>
+            <button className="secondaryButton" onClick={props.onReveal}>
+              Reveal
+            </button>
+            <button className="secondaryButton" onClick={props.onClose}>
+              Close
+            </button>
+          </div>
+        </header>
+        <div className="modalImageWrap">
+          <img src={props.dataUrl} alt="Generated output preview" />
+        </div>
+        <p className="modalPrompt">{props.detail.generation.prompt}</p>
+      </section>
+    </div>
+  );
+}
+
 function Inspector(props: {
   detail: GenerationDetail | null;
   imageDataUrl: string;
+  onOpen: () => void;
   onReveal: () => void;
   onDelete: () => void;
 }) {
@@ -693,7 +823,7 @@ function Inspector(props: {
         <h2>Result</h2>
         <dl>
           <dt>Status</dt>
-          <dd>{props.detail?.generation.status ?? "idle"}</dd>
+          <dd>{props.detail ? displayStatus(props.detail.generation.status) : "idle"}</dd>
           <dt>Model</dt>
           <dd>{props.detail?.generation.model ?? "-"}</dd>
           <dt>Size</dt>
@@ -712,6 +842,9 @@ function Inspector(props: {
       </div>
 
       <div className="inspectorActions">
+        <button className="secondaryButton" onClick={props.onOpen} disabled={!output}>
+          Open
+        </button>
         <button className="secondaryButton" onClick={props.onReveal} disabled={!output}>
           Reveal
         </button>
@@ -753,4 +886,13 @@ function formatTime(value: number) {
 function compactPath(path: string) {
   const parts = path.split(/[\\/]/);
   return parts.slice(-3).join("/");
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function displayStatus(status: Generation["status"]) {
+  if (status === "running") return "generating";
+  return status;
 }
