@@ -1,9 +1,12 @@
 use std::path::Path;
+
+#[cfg(target_os = "macos")]
 use std::process::Command;
 
 #[cfg(not(target_os = "macos"))]
 use std::collections::HashMap;
 
+#[cfg(target_os = "macos")]
 const SERVICE: &str = "Image Gen Kit";
 
 #[cfg(target_os = "macos")]
@@ -72,6 +75,7 @@ pub fn delete_api_key(app_data_dir: &Path, profile_id: &str) -> Result<(), Strin
     write_file_secrets(app_data_dir, &secrets)
 }
 
+#[cfg(target_os = "macos")]
 fn account_name(profile_id: &str) -> String {
     format!("profile:{profile_id}")
 }

@@ -8,17 +8,34 @@ use serde_json::{json, Value};
 use crate::app_paths;
 use crate::db;
 use crate::types::{
-    GenerateImageRequest, Generation, GenerationDetail, GenerationOutput, StoredProviderProfile,
+    GenerateImageRequest, Generation, GenerationDetail, GenerationInputImage, GenerationOutput,
+    InputImageRequest, StoredProviderProfile,
 };
 
-const IMAGE_API_TIMEOUT_SECONDS: u64 = 900;
+const MAX_EDIT_IMAGES: usize = 16;
+const MAX_EDIT_IMAGE_BYTES: usize = 50 * 1024 * 1024;
 
 pub struct OpenAiJob {
     pub generation: Generation,
     pub base_url: String,
     pub api_key: String,
     pub debug_mode: bool,
+    pub timeout_seconds: u64,
+    pub endpoint: OpenAiEndpoint,
     pub params: Value,
+    pub input_images: Vec<PreparedInputImage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiEndpoint {
+    Generation,
+    Edit,
+}
+
+pub struct PreparedInputImage {
+    name: String,
+    mime_type: String,
+    bytes: Vec<u8>,
 }
 
 pub fn create_job(
@@ -26,9 +43,20 @@ pub fn create_job(
     profile: StoredProviderProfile,
     api_key: String,
 ) -> Result<OpenAiJob, String> {
+    let timeout_minutes = validate_timeout_minutes(
+        request
+            .network_timeout_minutes
+            .unwrap_or(profile.profile.network_timeout_minutes),
+    )?;
     let normalized = NormalizedRequest::from_request(request)?;
     let now = crate::commands::now_millis();
-    let params_json = serde_json::to_string(&normalized.params).map_err(|err| err.to_string())?;
+    let request_json = request_record_json(
+        &profile.profile.base_url,
+        normalized.endpoint,
+        &normalized.history_params,
+        &normalized.input_images,
+        timeout_minutes,
+    )?;
     let generation = Generation {
         id: crate::commands::make_id("generation"),
         prompt: normalized.prompt.clone(),
@@ -40,7 +68,8 @@ pub fn create_job(
         size: normalized.size.clone(),
         quality: normalized.quality.clone(),
         output_format: normalized.output_format.clone(),
-        params_json,
+        params_json: request_json,
+        response_json: None,
         error_message: None,
         revised_prompt: None,
         created_at: now,
@@ -52,7 +81,10 @@ pub fn create_job(
         base_url: profile.profile.base_url,
         api_key,
         debug_mode: normalized.debug_mode,
-        params: normalized.params,
+        timeout_seconds: timeout_minutes as u64 * 60,
+        endpoint: normalized.endpoint,
+        params: normalized.api_params,
+        input_images: normalized.input_images,
     })
 }
 
@@ -68,12 +100,27 @@ fn run_job_inner(job: OpenAiJob, insert_generation: bool) -> Result<GenerationDe
     let normalized = NormalizedJob {
         output_format: job.generation.output_format.clone(),
         debug_mode: job.debug_mode,
+        timeout_seconds: job.timeout_seconds,
+        endpoint: job.endpoint,
         params: job.params,
+        input_images: job.input_images,
     };
     let generation = job.generation;
     if insert_generation {
         db::insert_generation(&generation)?;
     }
+    let persisted_inputs = match persist_input_images(&generation.id, &normalized.input_images) {
+        Ok(inputs) => inputs,
+        Err(message) => {
+            let _ = db::update_generation_failed(
+                &generation.id,
+                &message,
+                None,
+                crate::commands::now_millis(),
+            );
+            return Err(message);
+        }
+    };
     let debug_dir = if normalized.debug_mode {
         Some(app_paths::generation_debug_dir(&generation.id)?)
     } else {
@@ -86,26 +133,47 @@ fn run_job_inner(job: OpenAiJob, insert_generation: bool) -> Result<GenerationDe
         &normalized,
         debug_dir.as_deref(),
     )
-    .and_then(|response| persist_outputs(&generation.id, &normalized.output_format, response));
+    .and_then(|response| {
+        persist_outputs(
+            &generation.id,
+            &normalized.output_format,
+            response.parsed,
+            normalized.timeout_seconds,
+        )
+        .map(|(outputs, revised_prompt)| (outputs, revised_prompt, response.body))
+        .map_err(OpenAiCallError::new)
+    });
 
     match result {
-        Ok((outputs, revised_prompt)) => {
+        Ok((outputs, revised_prompt, response_json)) => {
             let completed_at = crate::commands::now_millis();
-            db::update_generation_success(&generation.id, revised_prompt.as_deref(), completed_at)?;
+            db::update_generation_success(
+                &generation.id,
+                revised_prompt.as_deref(),
+                Some(&response_json),
+                completed_at,
+            )?;
             db::get_generation_detail(&generation.id)?
                 .ok_or_else(|| "Generation was saved but could not be reloaded".to_string())
                 .map(|mut detail| {
                     if detail.outputs.is_empty() {
                         detail.outputs = outputs;
                     }
+                    if detail.input_images.is_empty() {
+                        detail.input_images = persisted_inputs;
+                    }
                     detail
                 })
         }
         Err(err) => {
-            let err = append_debug_path(err, debug_dir.as_deref());
-            let _ =
-                db::update_generation_failed(&generation.id, &err, crate::commands::now_millis());
-            Err(err)
+            let err = err.with_debug_path(debug_dir.as_deref());
+            let _ = db::update_generation_failed(
+                &generation.id,
+                &err.message,
+                err.response_json.as_deref(),
+                crate::commands::now_millis(),
+            );
+            Err(err.message)
         }
     }
 }
@@ -115,7 +183,21 @@ fn call_openai(
     api_key: &str,
     normalized: &NormalizedJob,
     debug_dir: Option<&Path>,
-) -> Result<OpenAiImageResponse, String> {
+) -> Result<OpenAiCallResponse, OpenAiCallError> {
+    match normalized.endpoint {
+        OpenAiEndpoint::Generation => {
+            call_openai_generation(base_url, api_key, normalized, debug_dir)
+        }
+        OpenAiEndpoint::Edit => call_openai_edit(base_url, api_key, normalized, debug_dir),
+    }
+}
+
+fn call_openai_generation(
+    base_url: &str,
+    api_key: &str,
+    normalized: &NormalizedJob,
+    debug_dir: Option<&Path>,
+) -> Result<OpenAiCallResponse, OpenAiCallError> {
     let url = image_generation_url(base_url)?;
     let payload = serde_json::to_string(&normalized.params).map_err(|err| err.to_string())?;
     write_debug_json(
@@ -134,7 +216,7 @@ fn call_openai(
     let response = ureq::post(&url)
         .set("Authorization", &format!("Bearer {api_key}"))
         .set("Content-Type", "application/json")
-        .timeout(Duration::from_secs(IMAGE_API_TIMEOUT_SECONDS))
+        .timeout(Duration::from_secs(normalized.timeout_seconds))
         .send_string(&payload);
 
     let body = match response {
@@ -147,24 +229,103 @@ fn call_openai(
         Err(ureq::Error::Status(code, response)) => {
             let body = response.into_string().unwrap_or_default();
             write_debug_response(debug_dir, "http-error-response", code, &body);
-            return Err(format!(
-                "Image API returned {code}: {}",
-                api_error_message(&body)
+            return Err(OpenAiCallError::with_response(
+                format!("Image API returned {code}: {}", api_error_message(&body)),
+                response_body_json(&body),
             ));
         }
         Err(ureq::Error::Transport(err)) => {
             write_debug_text(debug_dir, "transport-error.txt", &err.to_string());
-            return Err(format!("Image API request failed: {err}"));
+            return Err(OpenAiCallError::new(format!(
+                "Image API request failed: {err}"
+            )));
         }
     };
 
-    parse_image_response(&body)
+    let parsed = parse_image_response(&body).map_err(OpenAiCallError::new)?;
+    Ok(OpenAiCallResponse {
+        parsed,
+        body: response_body_json(&body),
+    })
+}
+
+fn call_openai_edit(
+    base_url: &str,
+    api_key: &str,
+    normalized: &NormalizedJob,
+    debug_dir: Option<&Path>,
+) -> Result<OpenAiCallResponse, OpenAiCallError> {
+    let url = image_edit_url(base_url)?;
+    let (body, boundary) = build_edit_multipart(&normalized.params, &normalized.input_images)?;
+    write_debug_json(
+        debug_dir,
+        "request.json",
+        &json!({
+            "method": "POST",
+            "url": url,
+            "headers": {
+                "authorization": "Bearer <redacted>",
+                "content-type": format!("multipart/form-data; boundary={boundary}")
+            },
+            "body": normalized.params,
+            "input_images": normalized
+                .input_images
+                .iter()
+                .map(|image| json!({
+                    "name": image.name,
+                    "mime_type": image.mime_type,
+                    "bytes": image.bytes.len()
+                }))
+                .collect::<Vec<_>>()
+        }),
+    );
+    let response = ureq::post(&url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )
+        .timeout(Duration::from_secs(normalized.timeout_seconds))
+        .send_bytes(&body);
+
+    let body = match response {
+        Ok(response) => {
+            let status = response.status();
+            let body = response.into_string().map_err(|err| err.to_string())?;
+            write_debug_response(debug_dir, "response", status, &body);
+            body
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            write_debug_response(debug_dir, "http-error-response", code, &body);
+            return Err(OpenAiCallError::with_response(
+                format!(
+                    "Image edit API returned {code}: {}",
+                    api_error_message(&body)
+                ),
+                response_body_json(&body),
+            ));
+        }
+        Err(ureq::Error::Transport(err)) => {
+            write_debug_text(debug_dir, "transport-error.txt", &err.to_string());
+            return Err(OpenAiCallError::new(format!(
+                "Image edit API request failed: {err}"
+            )));
+        }
+    };
+
+    let parsed = parse_image_response(&body).map_err(OpenAiCallError::new)?;
+    Ok(OpenAiCallResponse {
+        parsed,
+        body: response_body_json(&body),
+    })
 }
 
 fn persist_outputs(
     generation_id: &str,
     output_format: &str,
     response: OpenAiImageResponse,
+    timeout_seconds: u64,
 ) -> Result<(Vec<GenerationOutput>, Option<String>), String> {
     if response.data.is_empty() {
         return Err("Image API response did not include any image data".to_string());
@@ -182,7 +343,7 @@ fn persist_outputs(
         let payload = item.payload.ok_or_else(|| {
             "Image API response item did not include b64_json, url, base64, image, or another supported image field".to_string()
         })?;
-        let (bytes, detected_format) = image_bytes_from_payload(payload)?;
+        let (bytes, detected_format) = image_bytes_from_payload(payload, timeout_seconds)?;
         let item_format = detected_format.unwrap_or_else(|| output_format.to_string());
         let item_extension = extension_for_format(&item_format);
         let path = dir.join(format!("{generation_id}-{index}.{item_extension}"));
@@ -206,16 +367,116 @@ fn persist_outputs(
     Ok((outputs, revised_prompt))
 }
 
+fn persist_input_images(
+    generation_id: &str,
+    input_images: &[PreparedInputImage],
+) -> Result<Vec<GenerationInputImage>, String> {
+    if input_images.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let now = crate::commands::now_millis();
+    let dir = app_paths::generation_image_dir(now)?;
+    let mut persisted = Vec::new();
+
+    for (index, image) in input_images.iter().enumerate() {
+        let format = image
+            .mime_type
+            .strip_prefix("image/")
+            .map(normalize_format)
+            .unwrap_or_else(|| "png".to_string());
+        let extension = extension_for_format(&format);
+        let path = dir.join(format!("{generation_id}-input-{index}.{extension}"));
+        std::fs::write(&path, &image.bytes).map_err(|err| err.to_string())?;
+
+        let input = GenerationInputImage {
+            id: 0,
+            generation_id: generation_id.to_string(),
+            path: path.to_string_lossy().to_string(),
+            name: image.name.clone(),
+            mime_type: image.mime_type.clone(),
+            file_size: image.bytes.len() as i64,
+            input_index: index as i64,
+            created_at: now,
+        };
+        db::insert_input_image(&input)?;
+        persisted.push(input);
+    }
+
+    Ok(persisted)
+}
+
 pub fn image_generation_url(base_url: &str) -> Result<String, String> {
+    image_endpoint_url(base_url, "generations")
+}
+
+pub fn image_edit_url(base_url: &str) -> Result<String, String> {
+    image_endpoint_url(base_url, "edits")
+}
+
+fn request_record_json(
+    base_url: &str,
+    endpoint: OpenAiEndpoint,
+    params: &Value,
+    input_images: &[PreparedInputImage],
+    timeout_minutes: i64,
+) -> Result<String, String> {
+    let url = match endpoint {
+        OpenAiEndpoint::Generation => image_generation_url(base_url)?,
+        OpenAiEndpoint::Edit => image_edit_url(base_url)?,
+    };
+    let content_type = match endpoint {
+        OpenAiEndpoint::Generation => "application/json".to_string(),
+        OpenAiEndpoint::Edit => "multipart/form-data".to_string(),
+    };
+    let value = json!({
+        "method": "POST",
+        "url": url,
+        "headers": {
+            "authorization": "Bearer <redacted>",
+            "content-type": content_type
+        },
+        "timeout_minutes": timeout_minutes,
+        "body": params,
+        "input_images": input_images
+            .iter()
+            .map(|image| json!({
+                "name": image.name,
+                "mime_type": image.mime_type,
+                "bytes": image.bytes.len()
+            }))
+            .collect::<Vec<_>>()
+    });
+    serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
+}
+
+fn image_endpoint_url(base_url: &str, endpoint: &str) -> Result<String, String> {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("Base URL is required".to_string());
     }
-    if trimmed.ends_with("/images/generations") {
-        Ok(trimmed.to_string())
-    } else {
-        Ok(format!("{trimmed}/images/generations"))
+    if trimmed.ends_with("/images/generations") || trimmed.ends_with("/images/edits") {
+        let base = trimmed
+            .strip_suffix("/images/generations")
+            .or_else(|| trimmed.strip_suffix("/images/edits"))
+            .unwrap_or(trimmed);
+        return Ok(format!("{base}/images/{endpoint}"));
     }
+    Ok(format!("{trimmed}/images/{endpoint}"))
+}
+
+fn response_body_json(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|value| serde_json::to_string_pretty(&value).ok())
+        .unwrap_or_else(|| body.to_string())
+}
+
+fn validate_timeout_minutes(value: i64) -> Result<i64, String> {
+    if !(1..=120).contains(&value) {
+        return Err("Network timeout must be between 1 and 120 minutes".to_string());
+    }
+    Ok(value)
 }
 
 fn api_error_message(body: &str) -> String {
@@ -265,6 +526,45 @@ struct OpenAiImageItem {
     revised_prompt: Option<String>,
 }
 
+struct OpenAiCallResponse {
+    parsed: OpenAiImageResponse,
+    body: String,
+}
+
+struct OpenAiCallError {
+    message: String,
+    response_json: Option<String>,
+}
+
+impl OpenAiCallError {
+    fn new(message: String) -> Self {
+        Self {
+            message,
+            response_json: None,
+        }
+    }
+
+    fn with_response(message: String, response_json: String) -> Self {
+        Self {
+            message,
+            response_json: Some(response_json),
+        }
+    }
+
+    fn with_debug_path(mut self, debug_dir: Option<&Path>) -> Self {
+        if let Some(debug_dir) = debug_dir {
+            self.message = format!("{}. Debug files: {}", self.message, debug_dir.display());
+        }
+        self
+    }
+}
+
+impl From<String> for OpenAiCallError {
+    fn from(value: String) -> Self {
+        Self::new(value)
+    }
+}
+
 enum ImagePayload {
     Base64(String),
     Url(String),
@@ -277,13 +577,19 @@ struct NormalizedRequest {
     quality: String,
     output_format: String,
     debug_mode: bool,
-    params: Value,
+    endpoint: OpenAiEndpoint,
+    api_params: Value,
+    history_params: Value,
+    input_images: Vec<PreparedInputImage>,
 }
 
 struct NormalizedJob {
     output_format: String,
     debug_mode: bool,
+    timeout_seconds: u64,
+    endpoint: OpenAiEndpoint,
     params: Value,
+    input_images: Vec<PreparedInputImage>,
 }
 
 impl NormalizedRequest {
@@ -295,8 +601,14 @@ impl NormalizedRequest {
         let output_format = validate_output_format(&request.output_format)?;
         let moderation = validate_moderation(request.moderation.as_deref())?;
         let compression = validate_compression(request.output_compression, &output_format)?;
+        let input_images = prepare_input_images(request.input_images.unwrap_or_default())?;
+        let endpoint = if input_images.is_empty() {
+            OpenAiEndpoint::Generation
+        } else {
+            OpenAiEndpoint::Edit
+        };
 
-        let mut params = json!({
+        let mut api_params = json!({
             "model": model,
             "prompt": prompt,
             "size": size,
@@ -306,7 +618,23 @@ impl NormalizedRequest {
         });
 
         if let Some(compression) = compression {
-            params["output_compression"] = json!(compression);
+            api_params["output_compression"] = json!(compression);
+        }
+
+        let mut history_params = api_params.clone();
+        history_params["mode"] = json!(match endpoint {
+            OpenAiEndpoint::Generation => "generate",
+            OpenAiEndpoint::Edit => "edit",
+        });
+        if endpoint == OpenAiEndpoint::Edit {
+            history_params["input_images"] = json!(input_images
+                .iter()
+                .map(|image| json!({
+                    "name": image.name,
+                    "mime_type": image.mime_type,
+                    "bytes": image.bytes.len()
+                }))
+                .collect::<Vec<_>>());
         }
 
         Ok(Self {
@@ -316,9 +644,223 @@ impl NormalizedRequest {
             quality,
             output_format,
             debug_mode: request.debug_mode.unwrap_or(false),
-            params,
+            endpoint,
+            api_params,
+            history_params,
+            input_images,
         })
     }
+}
+
+fn prepare_input_images(images: Vec<InputImageRequest>) -> Result<Vec<PreparedInputImage>, String> {
+    if images.len() > MAX_EDIT_IMAGES {
+        return Err(format!(
+            "Image edit supports up to {MAX_EDIT_IMAGES} input images"
+        ));
+    }
+
+    images
+        .into_iter()
+        .enumerate()
+        .map(|(index, image)| prepare_input_image(index, image))
+        .collect()
+}
+
+fn prepare_input_image(
+    index: usize,
+    image: InputImageRequest,
+) -> Result<PreparedInputImage, String> {
+    let (bytes, data_url_mime) = decode_input_image_data(&image.data_url)?;
+    if bytes.is_empty() {
+        return Err("Input image is empty".to_string());
+    }
+    if bytes.len() > MAX_EDIT_IMAGE_BYTES {
+        return Err("Each input image must be 50MB or smaller".to_string());
+    }
+
+    let mime_type = normalize_input_mime(
+        image
+            .mime_type
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .or(data_url_mime.as_deref()),
+        &bytes,
+    )?;
+    let format = mime_type
+        .strip_prefix("image/")
+        .map(normalize_format)
+        .unwrap_or_else(|| "png".to_string());
+    let extension = extension_for_format(&format);
+    let name = sanitize_file_name(
+        image
+            .name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("input"),
+    );
+    let name = if Path::new(&name).extension().is_some() {
+        name
+    } else {
+        format!("{name}-{index}.{extension}")
+    };
+
+    Ok(PreparedInputImage {
+        name,
+        mime_type,
+        bytes,
+    })
+}
+
+fn decode_input_image_data(value: &str) -> Result<(Vec<u8>, Option<String>), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("Input image data is required".to_string());
+    }
+
+    let mime = mime_from_data_url(value);
+    let bytes = decode_image_base64(value)?;
+    Ok((bytes, mime))
+}
+
+fn mime_from_data_url(value: &str) -> Option<String> {
+    if !value.starts_with("data:") {
+        return None;
+    }
+    let header = value.split_once(',')?.0;
+    header
+        .strip_prefix("data:")
+        .and_then(|value| value.split(';').next())
+        .filter(|value| value.starts_with("image/"))
+        .map(normalize_mime_type)
+}
+
+fn normalize_input_mime(value: Option<&str>, bytes: &[u8]) -> Result<String, String> {
+    if let Some(value) = value {
+        let normalized = normalize_mime_type(value);
+        if is_supported_input_mime(&normalized) {
+            return Ok(normalized);
+        }
+    }
+
+    let inferred = infer_format_from_bytes(bytes)
+        .map(mime_type_for_format)
+        .filter(|value| is_supported_input_mime(value))
+        .map(ToString::to_string);
+    inferred.ok_or_else(|| "Input images must be PNG, JPEG, or WebP".to_string())
+}
+
+fn normalize_mime_type(value: &str) -> String {
+    match value.trim().to_lowercase().as_str() {
+        "image/jpg" | "image/pjpeg" => "image/jpeg".to_string(),
+        "image/png" => "image/png".to_string(),
+        "image/jpeg" => "image/jpeg".to_string(),
+        "image/webp" => "image/webp".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn is_supported_input_mime(value: &str) -> bool {
+    matches!(value, "image/png" | "image/jpeg" | "image/webp")
+}
+
+fn mime_type_for_format(format: &str) -> &'static str {
+    match normalize_format(format).as_str() {
+        "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "image/png",
+    }
+}
+
+fn sanitize_file_name(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let sanitized = sanitized.trim_matches(['.', '-']);
+    if sanitized.is_empty() {
+        "input".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+fn build_edit_multipart(
+    params: &Value,
+    input_images: &[PreparedInputImage],
+) -> Result<(Vec<u8>, String), String> {
+    if input_images.is_empty() {
+        return Err("At least one input image is required for image edits".to_string());
+    }
+
+    let boundary = format!(
+        "image-gen-kit-{}-{}",
+        crate::commands::now_millis(),
+        input_images.len()
+    );
+    let mut body = Vec::new();
+
+    let fields = params
+        .as_object()
+        .ok_or_else(|| "Image edit parameters must be an object".to_string())?;
+    for (name, value) in fields {
+        if let Some(value) = multipart_field_value(value) {
+            push_multipart_field(&mut body, &boundary, name, &value);
+        }
+    }
+
+    for image in input_images {
+        push_multipart_file(&mut body, &boundary, "image[]", image);
+    }
+
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok((body, boundary))
+}
+
+fn multipart_field_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn push_multipart_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"{}\"\r\n\r\n",
+            escape_multipart_header(name)
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(value.as_bytes());
+    body.extend_from_slice(b"\r\n");
+}
+
+fn push_multipart_file(body: &mut Vec<u8>, boundary: &str, name: &str, image: &PreparedInputImage) {
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+            escape_multipart_header(name),
+            escape_multipart_header(&image.name)
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", image.mime_type).as_bytes());
+    body.extend_from_slice(&image.bytes);
+    body.extend_from_slice(b"\r\n");
+}
+
+fn escape_multipart_header(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 fn response_items(value: &Value) -> Vec<&Value> {
@@ -420,7 +962,10 @@ fn image_payload_from_string(value: &str, trust_base64: bool) -> Option<ImagePay
     None
 }
 
-fn image_bytes_from_payload(payload: ImagePayload) -> Result<(Vec<u8>, Option<String>), String> {
+fn image_bytes_from_payload(
+    payload: ImagePayload,
+    timeout_seconds: u64,
+) -> Result<(Vec<u8>, Option<String>), String> {
     match payload {
         ImagePayload::Base64(value) => {
             let format = format_from_data_url(&value);
@@ -430,7 +975,7 @@ fn image_bytes_from_payload(payload: ImagePayload) -> Result<(Vec<u8>, Option<St
                 .or(format);
             Ok((bytes, detected))
         }
-        ImagePayload::Url(url) => download_image(&url),
+        ImagePayload::Url(url) => download_image(&url, timeout_seconds),
     }
 }
 
@@ -467,9 +1012,9 @@ fn decodes_to_known_image(value: &str) -> bool {
         .is_some()
 }
 
-fn download_image(url: &str) -> Result<(Vec<u8>, Option<String>), String> {
+fn download_image(url: &str, timeout_seconds: u64) -> Result<(Vec<u8>, Option<String>), String> {
     let response = ureq::get(url)
-        .timeout(Duration::from_secs(IMAGE_API_TIMEOUT_SECONDS))
+        .timeout(Duration::from_secs(timeout_seconds))
         .call()
         .map_err(|err| format!("Unable to download image URL returned by API: {err}"))?;
     let content_type = response.header("content-type").map(ToString::to_string);
@@ -572,13 +1117,6 @@ fn validate_compression(value: Option<i64>, output_format: &str) -> Result<Optio
         return Err("Output compression must be between 0 and 100".to_string());
     }
     Ok(Some(value))
-}
-
-fn append_debug_path(message: String, debug_dir: Option<&Path>) -> String {
-    match debug_dir {
-        Some(debug_dir) => format!("{message}. Debug files: {}", debug_dir.display()),
-        None => message,
-    }
 }
 
 fn write_debug_json(debug_dir: Option<&Path>, file_name: &str, value: &Value) {
@@ -711,11 +1249,20 @@ fn read_jpeg_dimensions(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_generation_url, parse_image_response, validate_size, ImagePayload};
+    use super::{
+        build_edit_multipart, image_edit_url, image_generation_url, parse_image_response,
+        validate_size, ImagePayload, PreparedInputImage,
+    };
 
     #[test]
     fn accepts_openai_size_constraints() {
         assert_eq!(validate_size("1024x1024").unwrap(), "1024x1024");
+        assert_eq!(validate_size("1536x1024").unwrap(), "1536x1024");
+        assert_eq!(validate_size("1024x1536").unwrap(), "1024x1536");
+        assert_eq!(validate_size("2048x2048").unwrap(), "2048x2048");
+        assert_eq!(validate_size("2048x1152").unwrap(), "2048x1152");
+        assert_eq!(validate_size("3840x2160").unwrap(), "3840x2160");
+        assert_eq!(validate_size("2160x3840").unwrap(), "2160x3840");
         assert_eq!(validate_size("AUTO").unwrap(), "auto");
     }
 
@@ -736,6 +1283,41 @@ mod tests {
             image_generation_url("https://example.test/v1/images/generations").unwrap(),
             "https://example.test/v1/images/generations"
         );
+    }
+
+    #[test]
+    fn builds_edit_endpoint_from_base_url() {
+        assert_eq!(
+            image_edit_url("https://api.openai.com/v1").unwrap(),
+            "https://api.openai.com/v1/images/edits"
+        );
+        assert_eq!(
+            image_edit_url("https://example.test/v1/images/generations").unwrap(),
+            "https://example.test/v1/images/edits"
+        );
+    }
+
+    #[test]
+    fn builds_edit_multipart_with_image_array_field() {
+        let image = PreparedInputImage {
+            name: "input.png".to_string(),
+            mime_type: "image/png".to_string(),
+            bytes: b"png-bytes".to_vec(),
+        };
+        let (body, boundary) = build_edit_multipart(
+            &serde_json::json!({
+                "model": "gpt-image-2",
+                "prompt": "make it cinematic",
+                "size": "auto"
+            }),
+            &[image],
+        )
+        .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains(&format!("--{boundary}")));
+        assert!(text.contains("name=\"prompt\""));
+        assert!(text.contains("name=\"image[]\"; filename=\"input.png\""));
+        assert!(text.contains("Content-Type: image/png"));
     }
 
     #[test]

@@ -16,6 +16,7 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
 tauri = { version = "2", features = [] }
 ureq = { version = "2.12", default-features = true }
 

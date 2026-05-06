@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
+use serde::Serialize;
 
 use crate::app_paths;
 use crate::db;
@@ -15,6 +16,16 @@ use crate::types::{
 };
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+const MAX_INPUT_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputImageDataUrl {
+    name: String,
+    mime_type: String,
+    data_url: String,
+    size: u64,
+}
 
 #[tauri::command]
 pub fn init_app() -> Result<AppBootstrap, String> {
@@ -59,6 +70,7 @@ pub fn save_provider_profile(
         request.provider_type.trim(),
         request.base_url.trim(),
         request.model_default.trim(),
+        normalize_timeout_minutes(request.network_timeout_minutes),
         api_key_ref.as_deref(),
         now,
     )
@@ -99,6 +111,7 @@ pub async fn start_generation(request: GenerateImageRequest) -> Result<StartedGe
     let initial = GenerationDetail {
         generation,
         outputs: Vec::new(),
+        input_images: Vec::new(),
     };
 
     tauri::async_runtime::spawn_blocking(move || {
@@ -127,9 +140,60 @@ pub fn read_image_data_url(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub fn read_input_image_data_urls(paths: Vec<String>) -> Result<Vec<InputImageDataUrl>, String> {
+    paths
+        .into_iter()
+        .map(|path| read_input_image_data_url(PathBuf::from(path)))
+        .collect()
+}
+
+#[tauri::command]
 pub fn reveal_image(path: String) -> Result<(), String> {
     let path = app_paths::ensure_path_in_images_dir(Path::new(&path))?;
     reveal_path(&path)
+}
+
+fn read_input_image_data_url(path: PathBuf) -> Result<InputImageDataUrl, String> {
+    let metadata = std::fs::metadata(&path).map_err(|err| err.to_string())?;
+    if !metadata.is_file() {
+        return Err(format!("Dropped path is not a file: {}", path.display()));
+    }
+    if metadata.len() > MAX_INPUT_IMAGE_BYTES {
+        return Err("Each input image must be 50MB or smaller".to_string());
+    }
+
+    let mime_type = input_image_mime_type(&path)?;
+    let bytes = std::fs::read(&path).map_err(|err| err.to_string())?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("input")
+        .to_string();
+
+    Ok(InputImageDataUrl {
+        name,
+        mime_type: mime_type.to_string(),
+        data_url: format!(
+            "data:{mime_type};base64,{}",
+            general_purpose::STANDARD.encode(bytes)
+        ),
+        size: metadata.len(),
+    })
+}
+
+fn input_image_mime_type(path: &Path) -> Result<&'static str, String> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "png" => Ok("image/png"),
+        "jpg" | "jpeg" => Ok("image/jpeg"),
+        "webp" => Ok("image/webp"),
+        _ => Err("Input images must be PNG, JPEG, or WebP".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -177,6 +241,10 @@ pub fn make_id(prefix: &str) -> String {
 fn generate_image_blocking(request: GenerateImageRequest) -> Result<GenerationDetail, String> {
     let job = prepare_openai_job(request)?;
     openai::run_job(job)
+}
+
+fn normalize_timeout_minutes(value: Option<i64>) -> i64 {
+    value.unwrap_or(15).clamp(1, 120)
 }
 
 fn prepare_openai_job(request: GenerateImageRequest) -> Result<openai::OpenAiJob, String> {

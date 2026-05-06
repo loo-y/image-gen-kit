@@ -5,8 +5,13 @@ A Tauri desktop workbench for generating images with OpenAI-compatible image API
 ## Features
 
 - Generate images with `gpt-image-2` through the Image API.
+- Edit images by uploading, dropping, or pasting PNG, JPEG, or WebP input images and calling the Image Edits API.
+- Preserve image-edit input originals in local history so a detail record can show the source images used for that request.
 - Enter a custom API key and base URL from the app UI.
+- Save multiple provider profiles with aliases and switch them from the top-right provider selector.
+- Configure the image request network timeout in Settings, in minutes.
 - Save prompts, model, parameters, status, and local image paths in SQLite.
+- Inspect a generation detail view with preserved prompt formatting, request/response payloads, and source image previews for troubleshooting.
 - Keep saved API keys out of the database. On macOS, saved keys use Keychain.
 - Provider-oriented backend so additional providers, such as Google image models, can be added behind the same UI/history model.
 - Browse previous generations in a gallery-style History view, then reuse, reveal, or delete a generation.
@@ -40,9 +45,19 @@ npm run tauri -- build
 
 Current macOS packaging target is the `.app` bundle. Full DMG packaging was intentionally not enabled as the default target because Tauri's generated DMG script failed in this environment even though the release binary and `.app` bundle built successfully.
 
+On Windows, `src-tauri/tauri.windows.conf.json` overrides the bundle target to NSIS:
+
+```bash
+npm run tauri -- build --ci --no-sign
+```
+
+The Windows installer is written to `src-tauri/target/release/bundle/nsis/Image Gen Kit_0.1.0_x64-setup.exe`. Current installer builds are unsigned and should be signed before public distribution.
+
 ## Current Limits
 
-- `gpt-image-2` text-to-image generation is implemented; image editing and multi-image workflows are not implemented yet.
+- `gpt-image-2` text-to-image generation and image edit requests are implemented. Mask-based local edits are not implemented yet.
 - Google/Nano Banana support is planned as a future provider adapter.
+- Provider type selection currently supports OpenAI-compatible providers; Google Nano Banana is listed as a TODO extension point.
+- Image-edit input originals are saved for new history records only; older records created before this schema change cannot be backfilled automatically.
 - API key storage is Keychain-backed on macOS. Non-macOS currently falls back to a local secrets JSON file and should be replaced before cross-platform release.
 - The app icon is a temporary placeholder and should be replaced before public distribution.

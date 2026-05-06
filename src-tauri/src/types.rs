@@ -8,6 +8,7 @@ pub struct ProviderProfile {
     pub provider_type: String,
     pub base_url: String,
     pub model_default: String,
+    pub network_timeout_minutes: i64,
     pub api_key_saved: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -21,6 +22,7 @@ pub struct SaveProviderProfileRequest {
     pub provider_type: String,
     pub base_url: String,
     pub model_default: String,
+    pub network_timeout_minutes: Option<i64>,
     pub api_key: Option<String>,
     pub save_api_key: bool,
 }
@@ -46,6 +48,7 @@ pub struct Generation {
     pub quality: String,
     pub output_format: String,
     pub params_json: String,
+    pub response_json: Option<String>,
     pub error_message: Option<String>,
     pub revised_prompt: Option<String>,
     pub created_at: i64,
@@ -66,11 +69,25 @@ pub struct GenerationOutput {
     pub created_at: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationInputImage {
+    pub id: i64,
+    pub generation_id: String,
+    pub path: String,
+    pub name: String,
+    pub mime_type: String,
+    pub file_size: i64,
+    pub input_index: i64,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationDetail {
     pub generation: Generation,
     pub outputs: Vec<GenerationOutput>,
+    pub input_images: Vec<GenerationInputImage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +119,16 @@ pub struct GenerateImageRequest {
     pub output_compression: Option<i64>,
     pub moderation: Option<String>,
     pub debug_mode: Option<bool>,
+    pub network_timeout_minutes: Option<i64>,
+    pub input_images: Option<Vec<InputImageRequest>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InputImageRequest {
+    pub name: Option<String>,
+    pub mime_type: Option<String>,
+    pub data_url: String,
 }
 
 #[derive(Debug, Clone)]

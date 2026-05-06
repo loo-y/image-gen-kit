@@ -1,5 +1,125 @@
 # Image Gen Kit 交接记录
 
+## 2026-05-06 收尾提交交接
+
+### 1. 本次会话目标 / 当前阶段目标
+
+本阶段目标是把 Image Gen Kit 从基础生成 MVP 推进到可在 Windows 上安装验证的 OpenAI-compatible 图片工作台。范围包括：Windows NSIS 安装包、Image Edit 输入图、尺寸配置补齐、历史记录排障信息、多供应商 profile、网络超时设置、Preview/Detail 弹窗体验，以及本次提交前的交接文档同步。当前方案是可验证的阶段方案，仍不是正式公开分发版本。
+
+### 2. 当前仓库状态
+
+- 当前分支：`main`。
+- 当前远端：`origin git@github.com:loo-y/image-gen-kit.git`。
+- 本次准备一起提交的主要文件：`src/App.tsx`、`src/styles.css`、`src-tauri/src/providers/openai.rs`、`src-tauri/src/db.rs`、`src-tauri/src/types.rs`、`src-tauri/src/commands.rs`、`src-tauri/src/sqlite.rs`、`src-tauri/src/main.rs`、`src-tauri/tauri.windows.conf.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`README.md`、`handover.md` 和 Tauri 生成的跨平台 icon 文件。
+- Windows 最新安装包路径：`src-tauri/target/release/bundle/nsis/Image Gen Kit_0.1.0_x64-setup.exe`。
+- 最新安装包 SHA256：`DAAD09F6C2C363BAE0CC137A1B612D111A0BDD58CEFE2797567207A524930B36`。
+- 本次交接文档更新会随同本次代码变更提交并推送到 `origin/main`；`src-tauri/target`、`dist`、`node_modules` 和 `.omx` 仍由 `.gitignore` 排除。
+
+### 3. 今天实际遇到的问题
+
+1. Windows 安装后启动会弹出 cmd 终端。触发条件是 release binary 没有声明 Windows GUI subsystem，会影响普通用户安装后的桌面体验。
+2. Windows 打包时 Rust 链接缺少 `sqlite3.lib`。触发条件是本地没有系统 SQLite import library，导致 Tauri release build 无法稳定完成。
+3. 生成尺寸选项不完整，无法直接选择用户要求的 square/landscape/portrait/2K/4K/auto 组合。
+4. 只支持文生图，不支持传入图片做 image edit；前端也缺少文件拖拽和剪贴板图片读取。
+5. 多张图片并发生成时 History 排序会随轮询完成顺序变化，导致列表视觉上跳动。
+6. 长请求仍可能超时，但超时时间不是用户可配置项。
+7. History 卡片直接展示错误信息，列表噪音大；Detail 里也缺少完整 request/response，排障不方便。
+8. Preview 弹窗在小视窗下提示词和图片会重叠；Detail 中 prompt 没保留原始换行格式。
+9. 图生图历史只保存输出图，没有保存输入原图，无法回看这次 edit 基于哪些源图。
+10. 右上角 `Save settings` 和 provider 下拉视觉粗糙，按钮文字会折行。
+
+### 4. 原因判断与结论
+
+- Windows cmd 弹窗是 Tauri/Rust release 程序 subsystem 配置问题，不是安装器问题；正确修复点是 `src-tauri/src/main.rs`。
+- Windows SQLite 链接问题来自依赖系统 `sqlite3.lib`，更稳的分发方案是改用 `libsqlite3-sys` bundled SQLite，而不是要求用户或 CI 额外安装 SQLite SDK。
+- History 排序跳动来自前端轮询 upsert 时把更新项重新插到数组顶部；稳定方案是前后端统一按 `created_at DESC, id DESC` 排序。
+- Detail request/response 应存文本 JSON，输入原图不应塞进 JSON 或 SQLite blob；当前结论是图片继续落盘，DB 只保存路径和元数据。
+- Google/Nano Banana 目前只保留 provider type TODO，不应混入 `openai.rs`，后续要新增独立 provider adapter。
+
+### 5. 这次已经落地的修复
+
+- `src-tauri/src/main.rs`：增加 release-only `windows_subsystem = "windows"`，修复 Windows 安装后启动弹 cmd 的问题。
+- `src-tauri/src/sqlite.rs`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`：改为使用 bundled `libsqlite3-sys`，避免 Windows 缺少 `sqlite3.lib`。
+- `src-tauri/tauri.windows.conf.json` 和 `src-tauri/icons/*`：Windows bundle target 固定为 NSIS，并补齐 Tauri 打包所需图标。
+- `src/App.tsx`、`src/styles.css`：补齐尺寸选项；新增 Image Edit 模式；支持上传、拖拽、剪贴板图片；优化 Settings、provider switcher、按钮和下拉框样式；Debug 默认勾选。
+- `src-tauri/src/providers/openai.rs`：新增 `/images/edits` multipart 请求；支持 OpenAI-compatible response 解析；记录 redacted request 和 response；增加可配置网络超时。
+- `src-tauri/src/db.rs`、`src-tauri/src/types.rs`：增加 `response_json`、`network_timeout_minutes` 和 `generation_input_images`；历史查询使用稳定排序；删除历史时同步删除输出图和输入图。
+- `src-tauri/src/commands.rs`、`src-tauri/src/lib.rs`：新增读取拖拽输入图 data URL 的 Tauri command，并把图生图输入原图保存/读取链路串起来。
+- `README.md`：补充 Windows NSIS 打包命令、安装包输出位置、Image Edit 输入图历史保存和当前限制。
+- `handover.md`：记录 Windows 打包、Image Edit、多供应商、超时、历史详情、Preview/Detail 和 Debug 默认勾选的交接信息。
+
+### 6. 已验证结果
+
+本阶段实际验证通过：
+
+- `cmd /c npm run build`：TypeScript 和 Vite production build 通过。
+- `cargo fmt --check`：Rust 格式检查通过。
+- `cargo check`：Rust 类型检查通过。
+- `cargo test`：7 个 Rust 单元测试通过。
+- `cmd /c npm run tauri -- build --ci --no-sign`：Windows release binary 和 NSIS 安装包生成成功。
+- 最新 installer：`Image Gen Kit_0.1.0_x64-setup.exe`，大小约 3.4 MB，SHA256 为 `DAAD09F6C2C363BAE0CC137A1B612D111A0BDD58CEFE2797567207A524930B36`。
+
+未验证：未使用真实 OpenAI API key 做线上文生图/图生图端到端调用；未安装运行最新 NSIS 包做人工 UI 回归；安装包未签名。
+
+### 7. 踩过的坑 / 已否定方案 / 关键约束
+
+- 不要重新引入系统 SQLite 链接依赖；Windows 上会回到 `sqlite3.lib` 缺失问题。
+- 不要把图生图输入原图放进 `params_json` 或 `response_json`；这会让 SQLite 历史记录膨胀，也会拖慢列表查询。
+- 不要把完成中的 generation 按轮询返回顺序插到 History 顶部；必须保持稳定排序。
+- 不要把错误详情直接显示在 History 卡片；当前设计是卡片只显示摘要，Detail 才展示错误/request/response。
+- `--no-sign` 只适合本地测试包，不是公开分发方案。
+
+### 8. 接手后如何继续
+
+1. 先读 `README.md` 的 Features、Build and Verification、Current Limits，确认当前能力和未完成项。
+2. 再读本文件顶部两个 `2026-05-06` 章节，理解 Windows 打包、Image Edit 和 History schema 的改动边界。
+3. 本地恢复后先跑 `cmd /c npm run build`、`cargo test`、`cargo check`。
+4. 如果要验证 Windows 包，运行 `cmd /c npm run tauri -- build --ci --no-sign`，检查 NSIS 输出路径。
+5. 手动验证优先顺序：保存 provider/API key、文生图、图生图上传/拖拽/粘贴、History Detail 的 request/response 和输入原图、Preview 小视窗滚动。
+6. 如果 History 原图不显示，优先查 `generation_input_images.path` 是否在 app images 目录内，以及 `read_image_data_url` 是否拒绝了路径。
+
+### 9. 当前仍存在的问题 / 边界
+
+- 安装包未签名，Windows SmartScreen/安全提示没有处理。
+- 没有真实 API key 端到端验证线上 OpenAI 图片生成和编辑。
+- 旧的图生图历史记录无法自动补回输入原图；只有 schema 更新后的新记录会保存。
+- Mask-based image edit 没有实现。
+- Google/Nano Banana 只是禁用 TODO provider type，后端 adapter 未实现。
+- Windows/Linux API key 仍是本地 JSON fallback，不适合最终分发。
+- 当前 app icon 是临时占位。
+
+### 10. 最终想实现的产品目标
+
+最终目标仍是一个可交付普通用户安装的桌面图片生成工具：用户可以配置多个 provider，稳定生成/编辑图片，浏览可追溯的历史记录，查看完整排障信息，并获得签名安装包和正式图标。当前版本已经打通 Windows NSIS 安装包和 Image Edit 主链路，但仍需要真实 API 验证、安全存储和正式分发处理。
+
+### 11. 后续 TODO
+
+1. 用真实 OpenAI API key 验证文生图和图生图端到端链路，确认 request 参数、response 解析、图片落盘、History Detail 全部可用。
+2. 安装最新 NSIS 包做人工 UI 回归，重点看启动无 cmd、Preview 小视窗、Detail prompt 换行、输入原图预览。
+3. 给 Windows 安装包接入代码签名，避免公开分发时出现不必要的安全提示。
+4. 替换正式 app icon，删除临时占位视觉。
+5. 为 Google/Nano Banana 新增独立 provider adapter，不要污染 OpenAI-compatible adapter。
+6. 替换 Windows/Linux API key 本地 JSON fallback，接入系统级安全存储。
+7. 增加自动化集成测试或 API mock，覆盖成功响应、HTTP error、图生图 multipart、输入图保存和历史删除。
+
+## 2026-05-06 Windows 打包与 Image Edit 更新
+
+- Windows NSIS 安装包已生成成功，路径为 `src-tauri/target/release/bundle/nsis/Image Gen Kit_0.1.0_x64-setup.exe`。
+- Windows 启动弹出 cmd 的原因是 release binary 缺少 `windows_subsystem = "windows"`；已在 `src-tauri/src/main.rs` 增加 release-only GUI 子系统声明。
+- Windows 打包缺少 `sqlite3.lib` 的问题已修复：`src-tauri/src/sqlite.rs` 改为复用 `libsqlite3-sys` 绑定，`Cargo.toml` 使用 `bundled` SQLite。
+- Windows bundle 默认目标已通过 `src-tauri/tauri.windows.conf.json` 覆盖为 `nsis`，不会影响 macOS 默认 `.app` 配置。
+- Generate 页尺寸选项已补齐：`1024x1024`、`1536x1024`、`1024x1536`、`2048x2048`、`2048x1152`、`3840x2160`、`2160x3840`、`auto`，默认使用 `auto`。
+- 已新增 Image Edit MVP：前端支持上传、拖拽、粘贴 PNG/JPEG/WebP 输入图，后端根据输入图自动走 OpenAI-compatible `POST /images/edits` multipart 请求；mask 局部编辑 UI 尚未实现。
+- History 排序已改为前后端稳定排序：DB 使用 `created_at DESC, id DESC`，前端轮询更新不再把完成项强行插到顶部。
+- Settings 已增加网络超时配置，单位分钟，范围 1-120，保存到 provider profile 并传入本次请求。
+- History 卡片不再直接显示错误详情；新增 Detail 弹窗，展开后查看错误、元信息、本次 request 和 response，便于排障。
+- Detail 弹窗的 prompt 已改为保留原始换行格式；Preview 弹窗在小视窗下改为滚动布局，避免图片和提示词重叠。
+- 图生图输入原图已随历史保存到 app images 目录，DB 使用 `generation_input_images` 记录路径和元数据，Detail 中按需加载原图预览；删除历史时会一并删除输入原图文件。
+- Generate 页 Debug 模式默认勾选，便于默认保留请求/响应调试文件。
+- 右上角 provider 下拉和 `Save settings` 按钮已重做样式，避免按钮文字折行。
+- Settings 已支持多供应商 profile：可新建供应商、填写供应商别名、选择 provider type；目前只启用 OpenAI-compatible，Google Nano Banana 作为禁用 TODO 类型保留。右上角 provider selector 可直接切换已保存供应商，label 已移动到下拉框左侧。
+- 已验证：`npm run build`、`cargo fmt --check`、`cargo check`、`cargo test`，以及 Windows `npm run tauri -- build --ci --no-sign`。
+
 ## 2026-05-06 会话总结
 
 ### 1. 本次会话目标 / 当前阶段目标

@@ -1,7 +1,8 @@
 use crate::app_paths;
 use crate::sqlite::Connection;
 use crate::types::{
-    Generation, GenerationDetail, GenerationOutput, ProviderProfile, StoredProviderProfile,
+    Generation, GenerationDetail, GenerationInputImage, GenerationOutput, ProviderProfile,
+    StoredProviderProfile,
 };
 
 pub fn init_database() -> Result<(), String> {
@@ -17,6 +18,7 @@ pub fn init_database() -> Result<(), String> {
             provider_type TEXT NOT NULL,
             base_url TEXT NOT NULL,
             model_default TEXT NOT NULL,
+            network_timeout_minutes INTEGER NOT NULL DEFAULT 15,
             api_key_ref TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
@@ -34,6 +36,7 @@ pub fn init_database() -> Result<(), String> {
             quality TEXT NOT NULL,
             output_format TEXT NOT NULL,
             params_json TEXT NOT NULL,
+            response_json TEXT,
             error_message TEXT,
             revised_prompt TEXT,
             created_at INTEGER NOT NULL,
@@ -53,10 +56,30 @@ pub fn init_database() -> Result<(), String> {
             FOREIGN KEY(generation_id) REFERENCES generations(id) ON DELETE CASCADE
         );
 
+        CREATE TABLE IF NOT EXISTS generation_input_images (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            generation_id TEXT NOT NULL,
+            path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            input_index INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY(generation_id) REFERENCES generations(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_generations_created_at ON generations(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_outputs_generation_id ON generation_outputs(generation_id);
+        CREATE INDEX IF NOT EXISTS idx_input_images_generation_id ON generation_input_images(generation_id);
         "#,
     )?;
+    ensure_column(
+        &db,
+        "provider_profiles",
+        "network_timeout_minutes",
+        "INTEGER NOT NULL DEFAULT 15",
+    )?;
+    ensure_column(&db, "generations", "response_json", "TEXT")?;
     ensure_default_profile(&db)
 }
 
@@ -77,7 +100,8 @@ pub fn list_profiles() -> Result<Vec<ProviderProfile>, String> {
     let db = open()?;
     let mut stmt = db.prepare(
         r#"
-        SELECT id, name, provider_type, base_url, model_default, api_key_ref, created_at, updated_at
+        SELECT id, name, provider_type, base_url, model_default, network_timeout_minutes,
+               api_key_ref, created_at, updated_at
         FROM provider_profiles
         ORDER BY created_at ASC
         "#,
@@ -94,7 +118,8 @@ pub fn get_profile(id: &str) -> Result<Option<StoredProviderProfile>, String> {
     let db = open()?;
     let mut stmt = db.prepare(
         r#"
-        SELECT id, name, provider_type, base_url, model_default, api_key_ref, created_at, updated_at
+        SELECT id, name, provider_type, base_url, model_default, network_timeout_minutes,
+               api_key_ref, created_at, updated_at
         FROM provider_profiles
         WHERE id = ?1
         "#,
@@ -112,7 +137,8 @@ pub fn first_profile() -> Result<StoredProviderProfile, String> {
     let db = open()?;
     let mut stmt = db.prepare(
         r#"
-        SELECT id, name, provider_type, base_url, model_default, api_key_ref, created_at, updated_at
+        SELECT id, name, provider_type, base_url, model_default, network_timeout_minutes,
+               api_key_ref, created_at, updated_at
         FROM provider_profiles
         ORDER BY created_at ASC
         LIMIT 1
@@ -131,6 +157,7 @@ pub fn upsert_profile(
     provider_type: &str,
     base_url: &str,
     model_default: &str,
+    network_timeout_minutes: i64,
     api_key_ref: Option<&str>,
     now: i64,
 ) -> Result<ProviderProfile, String> {
@@ -142,14 +169,16 @@ pub fn upsert_profile(
     let mut stmt = db.prepare(
         r#"
         INSERT INTO provider_profiles (
-            id, name, provider_type, base_url, model_default, api_key_ref, created_at, updated_at
+            id, name, provider_type, base_url, model_default, network_timeout_minutes,
+            api_key_ref, created_at, updated_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             provider_type = excluded.provider_type,
             base_url = excluded.base_url,
             model_default = excluded.model_default,
+            network_timeout_minutes = excluded.network_timeout_minutes,
             api_key_ref = excluded.api_key_ref,
             updated_at = excluded.updated_at
         "#,
@@ -159,9 +188,10 @@ pub fn upsert_profile(
     stmt.bind_text(3, provider_type)?;
     stmt.bind_text(4, base_url)?;
     stmt.bind_text(5, model_default)?;
-    stmt.bind_optional_text(6, api_key_ref)?;
-    stmt.bind_i64(7, existing_created_at)?;
-    stmt.bind_i64(8, now)?;
+    stmt.bind_i64(6, network_timeout_minutes)?;
+    stmt.bind_optional_text(7, api_key_ref)?;
+    stmt.bind_i64(8, existing_created_at)?;
+    stmt.bind_i64(9, now)?;
     stmt.step()?;
     get_profile(id)?
         .map(|stored| stored.profile)
@@ -175,10 +205,10 @@ pub fn insert_generation(generation: &Generation) -> Result<(), String> {
         r#"
         INSERT INTO generations (
             id, prompt, provider_id, provider_type, provider_name, model, status,
-            size, quality, output_format, params_json, error_message, revised_prompt,
+            size, quality, output_format, params_json, response_json, error_message, revised_prompt,
             created_at, completed_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
         "#,
     )?;
     stmt.bind_text(1, &generation.id)?;
@@ -192,12 +222,13 @@ pub fn insert_generation(generation: &Generation) -> Result<(), String> {
     stmt.bind_text(9, &generation.quality)?;
     stmt.bind_text(10, &generation.output_format)?;
     stmt.bind_text(11, &generation.params_json)?;
-    stmt.bind_optional_text(12, generation.error_message.as_deref())?;
-    stmt.bind_optional_text(13, generation.revised_prompt.as_deref())?;
-    stmt.bind_i64(14, generation.created_at)?;
+    stmt.bind_optional_text(12, generation.response_json.as_deref())?;
+    stmt.bind_optional_text(13, generation.error_message.as_deref())?;
+    stmt.bind_optional_text(14, generation.revised_prompt.as_deref())?;
+    stmt.bind_i64(15, generation.created_at)?;
     match generation.completed_at {
-        Some(value) => stmt.bind_i64(15, value)?,
-        None => stmt.bind_null(15)?,
+        Some(value) => stmt.bind_i64(16, value)?,
+        None => stmt.bind_null(16)?,
     }
     stmt.step()?;
     Ok(())
@@ -206,35 +237,44 @@ pub fn insert_generation(generation: &Generation) -> Result<(), String> {
 pub fn update_generation_success(
     id: &str,
     revised_prompt: Option<&str>,
+    response_json: Option<&str>,
     completed_at: i64,
 ) -> Result<(), String> {
     let db = open()?;
     let mut stmt = db.prepare(
         r#"
         UPDATE generations
-        SET status = 'succeeded', error_message = NULL, revised_prompt = ?2, completed_at = ?3
+        SET status = 'succeeded', error_message = NULL, revised_prompt = ?2,
+            response_json = ?3, completed_at = ?4
         WHERE id = ?1
         "#,
     )?;
     stmt.bind_text(1, id)?;
     stmt.bind_optional_text(2, revised_prompt)?;
-    stmt.bind_i64(3, completed_at)?;
+    stmt.bind_optional_text(3, response_json)?;
+    stmt.bind_i64(4, completed_at)?;
     stmt.step()?;
     Ok(())
 }
 
-pub fn update_generation_failed(id: &str, message: &str, completed_at: i64) -> Result<(), String> {
+pub fn update_generation_failed(
+    id: &str,
+    message: &str,
+    response_json: Option<&str>,
+    completed_at: i64,
+) -> Result<(), String> {
     let db = open()?;
     let mut stmt = db.prepare(
         r#"
         UPDATE generations
-        SET status = 'failed', error_message = ?2, completed_at = ?3
+        SET status = 'failed', error_message = ?2, response_json = ?3, completed_at = ?4
         WHERE id = ?1
         "#,
     )?;
     stmt.bind_text(1, id)?;
     stmt.bind_text(2, message)?;
-    stmt.bind_i64(3, completed_at)?;
+    stmt.bind_optional_text(3, response_json)?;
+    stmt.bind_i64(4, completed_at)?;
     stmt.step()?;
     Ok(())
 }
@@ -261,6 +301,27 @@ pub fn insert_output(output: &GenerationOutput) -> Result<(), String> {
     Ok(())
 }
 
+pub fn insert_input_image(input: &GenerationInputImage) -> Result<(), String> {
+    let db = open()?;
+    let mut stmt = db.prepare(
+        r#"
+        INSERT INTO generation_input_images (
+            generation_id, path, name, mime_type, file_size, input_index, created_at
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "#,
+    )?;
+    stmt.bind_text(1, &input.generation_id)?;
+    stmt.bind_text(2, &input.path)?;
+    stmt.bind_text(3, &input.name)?;
+    stmt.bind_text(4, &input.mime_type)?;
+    stmt.bind_i64(5, input.file_size)?;
+    stmt.bind_i64(6, input.input_index)?;
+    stmt.bind_i64(7, input.created_at)?;
+    stmt.step()?;
+    Ok(())
+}
+
 pub fn list_generation_details(
     query: Option<&str>,
     limit: i64,
@@ -274,11 +335,11 @@ pub fn list_generation_details(
         let mut stmt = db.prepare(
             r#"
             SELECT id, prompt, provider_id, provider_type, provider_name, model, status,
-                   size, quality, output_format, params_json, error_message, revised_prompt,
+                   size, quality, output_format, params_json, response_json, error_message, revised_prompt,
                    created_at, completed_at
             FROM generations
             WHERE prompt LIKE ?1 OR model LIKE ?1 OR provider_name LIKE ?1
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ?2 OFFSET ?3
             "#,
         )?;
@@ -292,10 +353,10 @@ pub fn list_generation_details(
         let mut stmt = db.prepare(
             r#"
             SELECT id, prompt, provider_id, provider_type, provider_name, model, status,
-                   size, quality, output_format, params_json, error_message, revised_prompt,
+                   size, quality, output_format, params_json, response_json, error_message, revised_prompt,
                    created_at, completed_at
             FROM generations
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT ?1 OFFSET ?2
             "#,
         )?;
@@ -310,9 +371,11 @@ pub fn list_generation_details(
         .into_iter()
         .map(|generation| {
             let outputs = list_outputs(&generation.id)?;
+            let input_images = list_input_images(&generation.id)?;
             Ok(GenerationDetail {
                 generation,
                 outputs,
+                input_images,
             })
         })
         .collect()
@@ -324,7 +387,7 @@ pub fn get_generation_detail(id: &str) -> Result<Option<GenerationDetail>, Strin
     let mut stmt = db.prepare(
         r#"
         SELECT id, prompt, provider_id, provider_type, provider_name, model, status,
-               size, quality, output_format, params_json, error_message, revised_prompt,
+               size, quality, output_format, params_json, response_json, error_message, revised_prompt,
                created_at, completed_at
         FROM generations
         WHERE id = ?1
@@ -334,9 +397,11 @@ pub fn get_generation_detail(id: &str) -> Result<Option<GenerationDetail>, Strin
     if stmt.step()? {
         let generation = generation_from_stmt(&stmt);
         let outputs = list_outputs(&generation.id)?;
+        let input_images = list_input_images(&generation.id)?;
         Ok(Some(GenerationDetail {
             generation,
             outputs,
+            input_images,
         }))
     } else {
         Ok(None)
@@ -361,10 +426,33 @@ pub fn list_outputs(generation_id: &str) -> Result<Vec<GenerationOutput>, String
     Ok(outputs)
 }
 
+pub fn list_input_images(generation_id: &str) -> Result<Vec<GenerationInputImage>, String> {
+    let db = open()?;
+    let mut stmt = db.prepare(
+        r#"
+        SELECT id, generation_id, path, name, mime_type, file_size, input_index, created_at
+        FROM generation_input_images
+        WHERE generation_id = ?1
+        ORDER BY input_index ASC
+        "#,
+    )?;
+    stmt.bind_text(1, generation_id)?;
+    let mut inputs = Vec::new();
+    while stmt.step()? {
+        inputs.push(input_image_from_stmt(&stmt));
+    }
+    Ok(inputs)
+}
+
 pub fn delete_generation(id: &str) -> Result<Vec<String>, String> {
     init_database()?;
     let outputs = list_outputs(id)?;
-    let paths = outputs.into_iter().map(|output| output.path).collect();
+    let inputs = list_input_images(id)?;
+    let paths = outputs
+        .into_iter()
+        .map(|output| output.path)
+        .chain(inputs.into_iter().map(|input| input.path))
+        .collect();
     let db = open()?;
     let mut stmt = db.prepare("DELETE FROM generations WHERE id = ?1")?;
     stmt.bind_text(1, id)?;
@@ -377,9 +465,10 @@ fn ensure_default_profile(db: &Connection) -> Result<(), String> {
     let mut stmt = db.prepare(
         r#"
         INSERT OR IGNORE INTO provider_profiles (
-            id, name, provider_type, base_url, model_default, api_key_ref, created_at, updated_at
+            id, name, provider_type, base_url, model_default, network_timeout_minutes,
+            api_key_ref, created_at, updated_at
         )
-        VALUES ('openai-default', 'OpenAI', 'openai', 'https://api.openai.com/v1', 'gpt-image-2', NULL, ?1, ?1)
+        VALUES ('openai-default', 'OpenAI', 'openai', 'https://api.openai.com/v1', 'gpt-image-2', 15, NULL, ?1, ?1)
         "#,
     )?;
     stmt.bind_i64(1, now)?;
@@ -387,8 +476,22 @@ fn ensure_default_profile(db: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn ensure_column(
+    db: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    match db.execute(&sql) {
+        Ok(()) => Ok(()),
+        Err(err) if err.to_lowercase().contains("duplicate column name") => Ok(()),
+        Err(err) => Err(err),
+    }
+}
+
 fn profile_from_stmt(stmt: &crate::sqlite::Statement<'_>) -> StoredProviderProfile {
-    let api_key_ref = stmt.column_text(5).filter(|value| !value.is_empty());
+    let api_key_ref = stmt.column_text(6).filter(|value| !value.is_empty());
     StoredProviderProfile {
         profile: ProviderProfile {
             id: stmt.column_text(0).unwrap_or_default(),
@@ -396,9 +499,10 @@ fn profile_from_stmt(stmt: &crate::sqlite::Statement<'_>) -> StoredProviderProfi
             provider_type: stmt.column_text(2).unwrap_or_default(),
             base_url: stmt.column_text(3).unwrap_or_default(),
             model_default: stmt.column_text(4).unwrap_or_default(),
+            network_timeout_minutes: stmt.column_i64(5).clamp(1, 120),
             api_key_saved: api_key_ref.is_some(),
-            created_at: stmt.column_i64(6),
-            updated_at: stmt.column_i64(7),
+            created_at: stmt.column_i64(7),
+            updated_at: stmt.column_i64(8),
         },
         api_key_ref,
     }
@@ -417,10 +521,11 @@ fn generation_from_stmt(stmt: &crate::sqlite::Statement<'_>) -> Generation {
         quality: stmt.column_text(8).unwrap_or_default(),
         output_format: stmt.column_text(9).unwrap_or_default(),
         params_json: stmt.column_text(10).unwrap_or_default(),
-        error_message: stmt.column_text(11).filter(|value| !value.is_empty()),
-        revised_prompt: stmt.column_text(12).filter(|value| !value.is_empty()),
-        created_at: stmt.column_i64(13),
-        completed_at: optional_i64(stmt, 14),
+        response_json: stmt.column_text(11).filter(|value| !value.is_empty()),
+        error_message: stmt.column_text(12).filter(|value| !value.is_empty()),
+        revised_prompt: stmt.column_text(13).filter(|value| !value.is_empty()),
+        created_at: stmt.column_i64(14),
+        completed_at: optional_i64(stmt, 15),
     }
 }
 
@@ -435,6 +540,19 @@ fn output_from_stmt(stmt: &crate::sqlite::Statement<'_>) -> GenerationOutput {
         file_size: stmt.column_i64(6),
         output_index: stmt.column_i64(7),
         created_at: stmt.column_i64(8),
+    }
+}
+
+fn input_image_from_stmt(stmt: &crate::sqlite::Statement<'_>) -> GenerationInputImage {
+    GenerationInputImage {
+        id: stmt.column_i64(0),
+        generation_id: stmt.column_text(1).unwrap_or_default(),
+        path: stmt.column_text(2).unwrap_or_default(),
+        name: stmt.column_text(3).unwrap_or_default(),
+        mime_type: stmt.column_text(4).unwrap_or_default(),
+        file_size: stmt.column_i64(5),
+        input_index: stmt.column_i64(6),
+        created_at: stmt.column_i64(7),
     }
 }
 

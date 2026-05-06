@@ -113,6 +113,32 @@ input:disabled {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
+}
+
+.profileSelect {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #706b61;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.profileSelect select {
+  min-width: 190px;
+  min-height: 42px;
+  border: 1px solid #d0c7b8;
+  border-radius: 10px;
+  outline: none;
+  padding: 0 36px 0 12px;
+  background:
+    linear-gradient(45deg, transparent 50%, #5f5a52 50%) calc(100% - 18px) 55% / 6px 6px no-repeat,
+    linear-gradient(135deg, #5f5a52 50%, transparent 50%) calc(100% - 12px) 55% / 6px 6px no-repeat,
+    #fffdf8;
+  color: #1f1d1a;
+  appearance: none;
 }
 
 .contentGrid {
@@ -164,6 +190,135 @@ textarea {
   background: #fffdf8;
   color: #1f1d1a;
   line-height: 1.45;
+}
+
+.modeSwitch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid #ded5c8;
+  border-radius: 8px;
+  background: #fffdf8;
+}
+
+.modeButton {
+  min-height: 34px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #706b61;
+  font-weight: 800;
+}
+
+.modeButton.active,
+.modeButton:hover {
+  background: #1f1d1a;
+  color: #fffaf0;
+}
+
+.editPanel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #ded5c8;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 10px;
+}
+
+.uploadTools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.uploadBox {
+  display: grid;
+  gap: 5px;
+  min-height: 78px;
+  place-items: center;
+  border: 1px dashed #b8ad9c;
+  border-radius: 8px;
+  background: #faf6ee;
+  color: #3b3731;
+  font-weight: 800;
+  text-align: center;
+  cursor: pointer;
+}
+
+.uploadBox.dropActive {
+  border-color: #2f8f83;
+  background: #edf7f4;
+  box-shadow: 0 0 0 3px rgba(47, 143, 131, 0.14);
+}
+
+.uploadBox input {
+  display: none;
+}
+
+.uploadBox small,
+.editHint,
+.editImageCard small {
+  color: #746d62;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.editHint {
+  margin: 0;
+  text-align: center;
+}
+
+.editImageGrid {
+  display: grid;
+  gap: 8px;
+}
+
+.editImageCard {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #e2d9cd;
+  border-radius: 8px;
+  padding: 7px;
+}
+
+.editImageCard img {
+  width: 54px;
+  height: 54px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: #1f1d1a;
+}
+
+.editImageCard strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.editImageCard button,
+.clearImagesButton,
+.pasteImageButton {
+  min-height: 30px;
+  border: 1px solid #d0c7b8;
+  border-radius: 8px;
+  background: #fffdf8;
+  color: #1f1d1a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.pasteImageButton {
+  min-height: 78px;
+  padding: 0 12px;
+}
+
+.clearImagesButton {
+  width: 100%;
 }
 
 textarea:focus,
@@ -237,12 +392,15 @@ select:focus {
 
 .primaryButton,
 .secondaryButton,
-.dangerButton {
+.dangerButton,
+.saveSettingsButton,
+.newProviderButton {
   min-height: 40px;
   border-radius: 8px;
   border: 1px solid transparent;
   padding: 0 14px;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .primaryButton {
@@ -272,6 +430,34 @@ select:focus {
 
 .dangerButton:hover {
   background: #ffeadf;
+}
+
+.saveSettingsButton {
+  min-width: 136px;
+  min-height: 42px;
+  border-color: #1f1d1a;
+  border-radius: 10px;
+  background: #1f1d1a;
+  color: #fffaf0;
+}
+
+.saveSettingsButton:hover {
+  background: #2f8f83;
+  border-color: #2f8f83;
+}
+
+.newProviderButton {
+  min-width: 120px;
+  min-height: 42px;
+  border-color: #d0c7b8;
+  border-radius: 10px;
+  background: #fffdf8;
+  color: #1f1d1a;
+}
+
+.newProviderButton:hover {
+  border-color: #2f8f83;
+  color: #285e57;
 }
 
 .historyPane {
@@ -542,13 +728,26 @@ select:focus {
   display: grid;
   place-items: center;
   padding: 28px;
+  overflow: auto;
   background: rgba(20, 19, 17, 0.72);
 }
 
 .imageModal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(1040px, 92vw);
+  height: min(920px, 92vh);
+  max-height: 92vh;
+  overflow: hidden;
+  border: 1px solid #d6cec0;
+  border-radius: 8px;
+  background: #f8f5ee;
+}
+
+.detailModal {
   display: flex;
   flex-direction: column;
-  width: min(1040px, 92vw);
+  width: min(1120px, 94vw);
   max-height: 92vh;
   overflow: hidden;
   border: 1px solid #d6cec0;
@@ -558,6 +757,7 @@ select:focus {
 
 .modalHeader {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
@@ -585,7 +785,7 @@ select:focus {
   display: grid;
   place-items: center;
   min-height: 0;
-  flex: 1;
+  overflow: hidden;
   background: #1f1d1a;
   padding: 14px;
 }
@@ -593,19 +793,128 @@ select:focus {
 .modalImageWrap img {
   display: block;
   max-width: 100%;
-  max-height: 68vh;
+  max-height: 100%;
   object-fit: contain;
 }
 
 .modalPrompt {
-  display: -webkit-box;
+  max-height: min(170px, 24vh);
   margin: 0;
   padding: 12px 16px;
-  overflow: hidden;
+  overflow: auto;
   color: #3b3731;
   line-height: 1.4;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.detailBody {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr);
+  gap: 12px;
+  overflow: auto;
+  padding: 14px;
+}
+
+.detailSection {
+  min-width: 0;
+  border: 1px solid #ded5c8;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 12px;
+}
+
+.detailSection h3 {
+  margin: 0 0 9px;
+  font-size: 13px;
+  text-transform: uppercase;
+  color: #6f685d;
+}
+
+.detailSection p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.detailPrompt {
+  max-height: 230px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.detailSection pre {
+  max-height: 330px;
+  overflow: auto;
+  margin: 0;
+  border-radius: 7px;
+  background: #1f1d1a;
+  color: #f8f5ee;
+  padding: 10px;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.errorDetail {
+  border-color: #efc3b1;
+  background: #fff1ea;
+}
+
+.inputImagesSection {
+  grid-column: 1 / -1;
+}
+
+.inputImageGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.inputImageCard {
+  min-width: 0;
+  margin: 0;
+  border: 1px solid #e0d6c8;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #f8f5ee;
+}
+
+.inputImagePreview {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1 / 1;
+  background: #1f1d1a;
+  color: #cfc6b8;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.inputImagePreview img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.inputImageCard figcaption {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+}
+
+.inputImageCard strong,
+.inputImageCard small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inputImageCard small {
+  color: #706b61;
+  font-size: 12px;
 }
 
 .inspector {
@@ -714,6 +1023,24 @@ dd {
   gap: 14px;
 }
 
+.settingsGroupHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settingsGroupHeader h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.settingsGroupHeader p {
+  margin: 4px 0 0;
+  color: #706b61;
+  font-size: 13px;
+}
+
 .providerNote p {
   margin: 0;
   color: #6f685d;
@@ -775,5 +1102,26 @@ dd {
 
   .galleryToolbar input {
     width: 100%;
+  }
+}
+
+@media (max-height: 640px) {
+  .modalOverlay {
+    place-items: start center;
+    padding: 12px;
+  }
+
+  .imageModal {
+    height: auto;
+    max-height: none;
+  }
+
+  .modalImageWrap {
+    min-height: 180px;
+    height: min(54vh, 420px);
+  }
+
+  .modalPrompt {
+    max-height: 150px;
   }
 }

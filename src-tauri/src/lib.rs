@@ -23,6 +23,7 @@ pub fn run() {
             commands::generate_image,
             commands::start_generation,
             commands::read_image_data_url,
+            commands::read_input_image_data_urls,
             commands::reveal_image,
             commands::open_image,
             commands::open_images_dir,
