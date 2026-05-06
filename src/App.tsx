@@ -603,6 +603,22 @@ export default function App() {
     await invoke("open_images_dir");
   }
 
+  async function minimizeToTray() {
+    try {
+      await invoke("minimize_to_tray");
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
+  async function quitApp() {
+    try {
+      await invoke("quit_app");
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
   async function previewGeneration(detail: GenerationDetail) {
     await selectGeneration(detail);
     const first = detail.outputs[0];
@@ -672,6 +688,12 @@ export default function App() {
             </button>
             <button className="saveSettingsButton" onClick={saveProfile} disabled={isSavingProfile}>
               {isSavingProfile ? "Saving" : "Save settings"}
+            </button>
+            <button className="trayButton" onClick={minimizeToTray}>
+              Tray
+            </button>
+            <button className="quitButton" onClick={quitApp}>
+              Quit
             </button>
           </div>
         </header>

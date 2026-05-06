@@ -394,7 +394,9 @@ select:focus {
 .secondaryButton,
 .dangerButton,
 .saveSettingsButton,
-.newProviderButton {
+.newProviderButton,
+.trayButton,
+.quitButton {
   min-height: 40px;
   border-radius: 8px;
   border: 1px solid transparent;
@@ -458,6 +460,32 @@ select:focus {
 .newProviderButton:hover {
   border-color: #2f8f83;
   color: #285e57;
+}
+
+.trayButton,
+.quitButton {
+  min-width: 70px;
+  min-height: 42px;
+  border-radius: 10px;
+  background: #fffdf8;
+}
+
+.trayButton {
+  border-color: #c7d9d5;
+  color: #285e57;
+}
+
+.trayButton:hover {
+  background: #edf7f4;
+}
+
+.quitButton {
+  border-color: #e6b7a5;
+  color: #9b341f;
+}
+
+.quitButton:hover {
+  background: #ffeadf;
 }
 
 .historyPane {

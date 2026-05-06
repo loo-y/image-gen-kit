@@ -1,5 +1,15 @@
 # Image Gen Kit 交接记录
 
+## 2026-05-06 系统通知与托盘更新
+
+- 已新增系统通知：`src-tauri/src/commands.rs` 在后台 `start_generation` 任务结束后，根据 `openai::run_existing_job` 的成功/失败结果调用 `tauri-plugin-notification` 发送系统通知；通知内容包含模型、供应商、输出数量或失败摘要。
+- 已新增系统托盘：`src-tauri/src/lib.rs` 启用 Tauri `tray-icon` feature，创建托盘图标和右键菜单，菜单包含 `Show Image Gen Kit` 和 `Quit`。
+- 窗口关闭行为已改为默认隐藏到托盘：`WindowEvent::CloseRequested` 中调用 `api.prevent_close()` 并隐藏窗口；真正退出需要托盘 `Quit` 或应用内 `Quit` 按钮。
+- 应用内已增加 `Tray` 和 `Quit` 按钮：`src/App.tsx` 调用新的 Tauri commands `minimize_to_tray` 和 `quit_app`；`src/styles.css` 增加对应按钮样式。
+- 新增依赖：`src-tauri/Cargo.toml` 增加 `tauri-plugin-notification = "2"`，`tauri` feature 增加 `tray-icon`；`Cargo.lock` 因插件引入了桌面通知和托盘相关依赖。
+- 已验证：`cmd /c npm run build`、`cargo fmt --check`、`cargo check`、`cargo test`、`cmd /c npm run tauri -- build --ci --no-sign` 均通过。
+- 未验证：没有人工安装最新 NSIS 包并实际点击托盘菜单；没有用真实 OpenAI API key 等待后台任务完成来确认 Windows/macOS 通知弹出。
+
 ## 2026-05-06 收尾提交交接
 
 ### 1. 本次会话目标 / 当前阶段目标

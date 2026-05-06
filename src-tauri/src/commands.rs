@@ -5,6 +5,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose, Engine as _};
 use serde::Serialize;
+use tauri::{AppHandle, Manager};
+use tauri_plugin_notification::NotificationExt;
 
 use crate::app_paths;
 use crate::db;
@@ -103,10 +105,18 @@ pub async fn generate_image(request: GenerateImageRequest) -> Result<GenerationD
 }
 
 #[tauri::command]
-pub async fn start_generation(request: GenerateImageRequest) -> Result<StartedGeneration, String> {
+pub async fn start_generation(
+    app: AppHandle,
+    request: GenerateImageRequest,
+) -> Result<StartedGeneration, String> {
     let job = prepare_openai_job(request)?;
     let generation_id = job.generation.id.clone();
     let generation = job.generation.clone();
+    let notification_context = GenerationNotificationContext {
+        prompt: generation.prompt.clone(),
+        model: generation.model.clone(),
+        provider_name: generation.provider_name.clone(),
+    };
     db::insert_generation(&generation)?;
     let initial = GenerationDetail {
         generation,
@@ -115,13 +125,28 @@ pub async fn start_generation(request: GenerateImageRequest) -> Result<StartedGe
     };
 
     tauri::async_runtime::spawn_blocking(move || {
-        let _ = openai::run_existing_job(job);
+        let result = openai::run_existing_job(job);
+        notify_generation_finished(&app, &notification_context, &result);
     });
 
     Ok(StartedGeneration {
         generation_id,
         generation: initial,
     })
+}
+
+#[tauri::command]
+pub fn minimize_to_tray(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window.hide().map_err(|err| err.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn quit_app(app: AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -241,6 +266,66 @@ pub fn make_id(prefix: &str) -> String {
 fn generate_image_blocking(request: GenerateImageRequest) -> Result<GenerationDetail, String> {
     let job = prepare_openai_job(request)?;
     openai::run_job(job)
+}
+
+struct GenerationNotificationContext {
+    prompt: String,
+    model: String,
+    provider_name: String,
+}
+
+fn notify_generation_finished(
+    app: &AppHandle,
+    context: &GenerationNotificationContext,
+    result: &Result<GenerationDetail, String>,
+) {
+    let (title, body) = match result {
+        Ok(detail) => {
+            let count = detail.outputs.len();
+            (
+                "Image generation succeeded",
+                format!(
+                    "{} output{} finished with {} via {}. {}",
+                    count,
+                    if count == 1 { "" } else { "s" },
+                    context.model,
+                    context.provider_name,
+                    notification_prompt(&context.prompt)
+                ),
+            )
+        }
+        Err(message) => (
+            "Image generation failed",
+            format!(
+                "{} via {} failed. {}",
+                context.model,
+                context.provider_name,
+                truncate_for_notification(message, 180)
+            ),
+        ),
+    };
+
+    let _ = app.notification().builder().title(title).body(body).show();
+}
+
+fn notification_prompt(prompt: &str) -> String {
+    let prompt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if prompt.is_empty() {
+        "Prompt was empty.".to_string()
+    } else {
+        format!("Prompt: {}", truncate_for_notification(&prompt, 120))
+    }
+}
+
+fn truncate_for_notification(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for ch in value.chars().take(max_chars) {
+        output.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        output.push_str("...");
+    }
+    output
 }
 
 fn normalize_timeout_minutes(value: Option<i64>) -> i64 {
