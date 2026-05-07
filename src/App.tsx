@@ -136,6 +136,7 @@ export default function App() {
   const [imageDataUrl, setImageDataUrl] = useState("");
   const [previewImage, setPreviewImage] = useState<{ detail: GenerationDetail; dataUrl: string } | null>(null);
   const [detailGeneration, setDetailGeneration] = useState<GenerationDetail | null>(null);
+  const [deleteCandidateId, setDeleteCandidateId] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSavingProfile, setIsSavingProfile] = useState(false);
   const [error, setError] = useState("");
@@ -144,6 +145,10 @@ export default function App() {
   const activeProfile = useMemo(
     () => profiles.find((profile) => profile.id === activeProfileId),
     [activeProfileId, profiles],
+  );
+  const deleteCandidate = useMemo(
+    () => history.find((detail) => detail.generation.id === deleteCandidateId) ?? null,
+    [deleteCandidateId, history],
   );
 
   const selectedSize = size === "custom" ? `${customWidth}x${customHeight}` : size;
@@ -562,9 +567,7 @@ export default function App() {
 
   async function deleteSelected() {
     if (!selected) return;
-    await deleteGeneration(selected.generation.id);
-    setSelected(null);
-    setImageDataUrl("");
+    deleteGeneration(selected.generation.id);
   }
 
   async function revealSelected() {
@@ -577,13 +580,26 @@ export default function App() {
     await invoke("reveal_debug_dir");
   }
 
-  async function deleteGeneration(id: string) {
+  function deleteGeneration(id: string) {
+    setDeleteCandidateId(id);
+  }
+
+  async function confirmDeleteGeneration() {
+    if (!deleteCandidateId) return;
+    const id = deleteCandidateId;
     await invoke("delete_generation", { id });
     setThumbnailUrls((current) => {
       const next = { ...current };
       delete next[id];
       return next;
     });
+    if (selected?.generation.id === id) {
+      setSelected(null);
+      setImageDataUrl("");
+    }
+    if (detailGeneration?.generation.id === id) setDetailGeneration(null);
+    if (previewImage?.detail.generation.id === id) setPreviewImage(null);
+    setDeleteCandidateId(null);
     await refreshHistory();
   }
 
@@ -629,6 +645,21 @@ export default function App() {
 
   async function useGeneration(detail: GenerationDetail) {
     await selectGeneration(detail);
+    if (detail.inputImages.length > 0) {
+      clearEditImages();
+      try {
+        const restoredImages = await loadHistoryInputImages(detail);
+        editImagesRef.current = restoredImages;
+        setEditImages(restoredImages);
+        setGenerationMode("edit");
+        setNotice(`Restored ${restoredImages.length} input image${restoredImages.length === 1 ? "" : "s"} from history`);
+      } catch (err) {
+        setError(errorMessage(err));
+      }
+    } else {
+      clearEditImages();
+      setGenerationMode("generate");
+    }
     setActiveView("generate");
   }
 
@@ -951,8 +982,44 @@ export default function App() {
             onReveal={() => revealGeneration(detailGeneration)}
           />
         )}
+        {deleteCandidateId && (
+          <DeleteConfirmModal
+            detail={deleteCandidate}
+            fallbackId={deleteCandidateId}
+            onCancel={() => setDeleteCandidateId(null)}
+            onConfirm={confirmDeleteGeneration}
+          />
+        )}
       </section>
     </main>
+  );
+}
+
+function DeleteConfirmModal(props: {
+  detail: GenerationDetail | null;
+  fallbackId: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const prompt = props.detail?.generation.prompt.trim() || props.fallbackId;
+  return (
+    <div className="modalOverlay" onClick={props.onCancel}>
+      <section className="confirmModal" onClick={(event) => event.stopPropagation()}>
+        <header>
+          <h2>Delete generation?</h2>
+          <p>This will remove the history record and saved image files.</p>
+        </header>
+        <p className="confirmPrompt">{prompt}</p>
+        <div className="confirmActions">
+          <button className="secondaryButton" onClick={props.onCancel}>
+            Cancel
+          </button>
+          <button className="dangerButton" onClick={props.onConfirm}>
+            Delete
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -1231,7 +1298,14 @@ function InputImagesSection(props: { images: GenerationInputImage[] }) {
     };
   }, [imageKey]);
 
-  if (props.images.length === 0) return null;
+  if (props.images.length === 0) {
+    return (
+      <section className="detailSection inputImagesSection">
+        <h3>Input images</h3>
+        <p className="emptyDetailText">No input images</p>
+      </section>
+    );
+  }
 
   return (
     <section className="detailSection inputImagesSection">
@@ -1291,7 +1365,27 @@ function GenerationDetailModal(props: {
             <p className="detailPrompt">{props.detail.generation.prompt}</p>
           </section>
 
-          <InputImagesSection images={props.detail.inputImages} />
+          <div className="detailInfoRow">
+            <InputImagesSection images={props.detail.inputImages} />
+
+            <section className="detailSection metadataSection">
+              <h3>Metadata</h3>
+              <dl>
+                <dt>ID</dt>
+                <dd>{props.detail.generation.id}</dd>
+                <dt>Provider</dt>
+                <dd>{props.detail.generation.providerName}</dd>
+                <dt>Size</dt>
+                <dd>{props.detail.generation.size}</dd>
+                <dt>Quality</dt>
+                <dd>{props.detail.generation.quality}</dd>
+                <dt>Format</dt>
+                <dd>{props.detail.generation.outputFormat}</dd>
+                <dt>Completed</dt>
+                <dd>{props.detail.generation.completedAt ? formatTime(props.detail.generation.completedAt) : "-"}</dd>
+              </dl>
+            </section>
+          </div>
 
           {props.detail.generation.errorMessage && (
             <section className="detailSection errorDetail">
@@ -1300,33 +1394,17 @@ function GenerationDetailModal(props: {
             </section>
           )}
 
-          <section className="detailSection">
-            <h3>Metadata</h3>
-            <dl>
-              <dt>ID</dt>
-              <dd>{props.detail.generation.id}</dd>
-              <dt>Provider</dt>
-              <dd>{props.detail.generation.providerName}</dd>
-              <dt>Size</dt>
-              <dd>{props.detail.generation.size}</dd>
-              <dt>Quality</dt>
-              <dd>{props.detail.generation.quality}</dd>
-              <dt>Format</dt>
-              <dd>{props.detail.generation.outputFormat}</dd>
-              <dt>Completed</dt>
-              <dd>{props.detail.generation.completedAt ? formatTime(props.detail.generation.completedAt) : "-"}</dd>
-            </dl>
-          </section>
+          <div className="detailPayloadRow">
+            <section className="detailSection requestSection">
+              <h3>Request</h3>
+              <pre>{prettyJson(props.detail.generation.paramsJson)}</pre>
+            </section>
 
-          <section className="detailSection">
-            <h3>Request</h3>
-            <pre>{prettyJson(props.detail.generation.paramsJson)}</pre>
-          </section>
-
-          <section className="detailSection">
-            <h3>Response</h3>
-            <pre>{props.detail.generation.responseJson ? prettyJson(props.detail.generation.responseJson) : "No response captured"}</pre>
-          </section>
+            <section className="detailSection responseSection">
+              <h3>Response</h3>
+              <pre>{props.detail.generation.responseJson ? prettyJson(props.detail.generation.responseJson) : "No response captured"}</pre>
+            </section>
+          </div>
         </div>
       </section>
     </div>
@@ -1490,6 +1568,22 @@ function errorMessage(err: unknown) {
 
 function knownSize(value: string) {
   return sizes.includes(value);
+}
+
+async function loadHistoryInputImages(detail: GenerationDetail): Promise<EditInputImage[]> {
+  const images = [...detail.inputImages].sort((a, b) => a.inputIndex - b.inputIndex);
+  return Promise.all(
+    images.map(async (image) => {
+      const dataUrl = await invoke<string>("read_image_data_url", { path: image.path });
+      return {
+        id: `history-${image.id}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        name: image.name || `Input ${image.inputIndex + 1}`,
+        mimeType: image.mimeType,
+        dataUrl,
+        size: image.fileSize,
+      };
+    }),
+  );
 }
 
 function upsertGeneration(current: GenerationDetail[], detail: GenerationDetail) {

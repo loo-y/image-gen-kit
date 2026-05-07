@@ -634,15 +634,28 @@ select:focus {
   border: 0;
   border-bottom: 1px solid #ded5c8;
   border-radius: 0;
-  background: #1f1d1a;
+  background:
+    linear-gradient(45deg, #eee8dd 25%, transparent 25%),
+    linear-gradient(-45deg, #eee8dd 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #eee8dd 75%),
+    linear-gradient(-45deg, transparent 75%, #eee8dd 75%),
+    #faf7ef;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-size: 16px 16px;
   padding: 0;
   overflow: hidden;
 }
 
 .galleryPreview img {
+  display: block;
   width: 100%;
   height: 100%;
-  object-fit: contain;
+  object-fit: cover;
+  object-position: center;
 }
 
 .galleryPlaceholder {
@@ -783,6 +796,45 @@ select:focus {
   background: #f8f5ee;
 }
 
+.confirmModal {
+  display: grid;
+  gap: 14px;
+  width: min(460px, 92vw);
+  border: 1px solid #d6cec0;
+  border-radius: 8px;
+  background: #f8f5ee;
+  padding: 18px;
+}
+
+.confirmModal h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.confirmModal p {
+  margin: 6px 0 0;
+  color: #706b61;
+  line-height: 1.4;
+}
+
+.confirmPrompt {
+  max-height: 140px;
+  overflow: auto;
+  border: 1px solid #efc3b1;
+  border-radius: 8px;
+  background: #fff8f4;
+  padding: 10px;
+  color: #1f1d1a !important;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.confirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .modalHeader {
   display: flex;
   flex-shrink: 0;
@@ -814,14 +866,27 @@ select:focus {
   place-items: center;
   min-height: 0;
   overflow: hidden;
-  background: #1f1d1a;
+  background:
+    linear-gradient(45deg, #eee8dd 25%, transparent 25%),
+    linear-gradient(-45deg, #eee8dd 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #eee8dd 75%),
+    linear-gradient(-45deg, transparent 75%, #eee8dd 75%),
+    #faf7ef;
+  background-position:
+    0 0,
+    0 8px,
+    8px -8px,
+    -8px 0;
+  background-size: 16px 16px;
   padding: 14px;
 }
 
 .modalImageWrap img {
   display: block;
-  max-width: 100%;
-  max-height: 100%;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   object-fit: contain;
 }
 
@@ -838,7 +903,6 @@ select:focus {
 
 .detailBody {
   display: grid;
-  grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr);
   gap: 12px;
   overflow: auto;
   padding: 14px;
@@ -871,6 +935,11 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
+.emptyDetailText {
+  color: #887f72;
+  font-weight: 700;
+}
+
 .detailSection pre {
   max-height: 330px;
   overflow: auto;
@@ -885,23 +954,54 @@ select:focus {
   overflow-wrap: anywhere;
 }
 
+.detailInfoRow,
+.detailPayloadRow {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.detailInfoRow {
+  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  align-items: stretch;
+}
+
+.detailPayloadRow {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.requestSection pre {
+  background: #24302f;
+  color: #eff8f4;
+}
+
+.responseSection pre {
+  background: #302c3a;
+  color: #f6f1ff;
+}
+
 .errorDetail {
   border-color: #efc3b1;
   background: #fff1ea;
 }
 
-.inputImagesSection {
-  grid-column: 1 / -1;
+.errorDetail pre {
+  background: #4c2419;
+  color: #fff4ee;
 }
 
 .inputImageGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  display: flex;
   gap: 10px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 4px;
 }
 
 .inputImageCard {
-  min-width: 0;
+  flex: 0 0 156px;
+  min-width: 156px;
   margin: 0;
   border: 1px solid #e0d6c8;
   border-radius: 8px;
