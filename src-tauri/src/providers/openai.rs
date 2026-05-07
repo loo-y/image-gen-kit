@@ -598,6 +598,8 @@ impl NormalizedRequest {
         let prompt = required_trimmed(&request.prompt, "Prompt")?;
         let size = validate_size(&request.size)?;
         let quality = validate_quality(&request.quality)?;
+        let image_count = validate_image_count(request.n)?;
+        validate_model_image_count(&model, image_count)?;
         let output_format = validate_output_format(&request.output_format)?;
         let moderation = validate_moderation(request.moderation.as_deref())?;
         let compression = validate_compression(request.output_compression, &output_format)?;
@@ -619,6 +621,9 @@ impl NormalizedRequest {
 
         if let Some(compression) = compression {
             api_params["output_compression"] = json!(compression);
+        }
+        if let Some(image_count) = image_count {
+            api_params["n"] = json!(image_count);
         }
 
         let mut history_params = api_params.clone();
@@ -1090,6 +1095,26 @@ fn validate_quality(value: &str) -> Result<String, String> {
     }
 }
 
+fn validate_image_count(value: Option<i64>) -> Result<Option<i64>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value == 1 {
+        return Ok(None);
+    }
+    if !(2..=10).contains(&value) {
+        return Err("Image count must be between 1 and 10".to_string());
+    }
+    Ok(Some(value))
+}
+
+fn validate_model_image_count(model: &str, image_count: Option<i64>) -> Result<(), String> {
+    if image_count.is_some() && model.eq_ignore_ascii_case("dall-e-3") {
+        return Err("dall-e-3 only supports one generated image per request".to_string());
+    }
+    Ok(())
+}
+
 fn validate_output_format(value: &str) -> Result<String, String> {
     let value = value.trim().to_lowercase();
     match value.as_str() {
@@ -1251,8 +1276,9 @@ fn read_jpeg_dimensions(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
 mod tests {
     use super::{
         build_edit_multipart, image_edit_url, image_generation_url, parse_image_response,
-        validate_size, ImagePayload, PreparedInputImage,
+        validate_size, ImagePayload, NormalizedRequest, PreparedInputImage,
     };
+    use crate::types::GenerateImageRequest;
 
     #[test]
     fn accepts_openai_size_constraints() {
@@ -1321,6 +1347,47 @@ mod tests {
     }
 
     #[test]
+    fn omits_default_image_count_from_generation_payload() {
+        let normalized =
+            NormalizedRequest::from_request(generate_request_with_count(Some(1))).unwrap();
+        assert!(normalized.api_params.get("n").is_none());
+        assert!(normalized.history_params.get("n").is_none());
+    }
+
+    #[test]
+    fn includes_requested_image_count_in_generation_payload() {
+        let normalized =
+            NormalizedRequest::from_request(generate_request_with_count(Some(4))).unwrap();
+        assert_eq!(
+            normalized
+                .api_params
+                .get("n")
+                .and_then(|value| value.as_i64()),
+            Some(4)
+        );
+        assert_eq!(
+            normalized
+                .history_params
+                .get("n")
+                .and_then(|value| value.as_i64()),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn rejects_out_of_range_image_count() {
+        assert!(NormalizedRequest::from_request(generate_request_with_count(Some(0))).is_err());
+        assert!(NormalizedRequest::from_request(generate_request_with_count(Some(11))).is_err());
+    }
+
+    #[test]
+    fn rejects_multiple_images_for_dall_e_3() {
+        let mut request = generate_request_with_count(Some(2));
+        request.model = "dall-e-3".to_string();
+        assert!(NormalizedRequest::from_request(request).is_err());
+    }
+
+    #[test]
     fn parses_url_image_response_from_compatible_provider() {
         let parsed = parse_image_response(
             r#"{"data":[{"url":"https://cdn.example.test/image.png","revised_prompt":"ok"}]}"#,
@@ -1344,5 +1411,24 @@ mod tests {
             parsed.data[0].payload,
             Some(ImagePayload::Base64(_))
         ));
+    }
+
+    fn generate_request_with_count(n: Option<i64>) -> GenerateImageRequest {
+        GenerateImageRequest {
+            provider_id: "profile".to_string(),
+            api_key_override: None,
+            base_url: None,
+            model: "gpt-image-2".to_string(),
+            prompt: "draw a product".to_string(),
+            size: "1024x1024".to_string(),
+            quality: "auto".to_string(),
+            n,
+            output_format: "png".to_string(),
+            output_compression: None,
+            moderation: Some("auto".to_string()),
+            debug_mode: None,
+            network_timeout_minutes: None,
+            input_images: None,
+        }
     }
 }

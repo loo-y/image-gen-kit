@@ -96,6 +96,7 @@ const sizes = [...sizeOptions.map((option) => option.value), "custom"];
 const qualities = ["auto", "low", "medium", "high"];
 const formats = ["png", "jpeg", "webp"];
 const moderationModes = ["auto", "low"];
+const defaultImageCount = 1;
 const providerTypeOptions = [
   { value: "openai", label: "OpenAI compatible", disabled: false },
   { value: "google-nano-banana", label: "Google Nano Banana (TODO)", disabled: true },
@@ -122,6 +123,7 @@ export default function App() {
   const [customWidth, setCustomWidth] = useState(1024);
   const [customHeight, setCustomHeight] = useState(1024);
   const [quality, setQuality] = useState("auto");
+  const [imageCount, setImageCount] = useState(defaultImageCount);
   const [outputFormat, setOutputFormat] = useState("png");
   const [outputCompression, setOutputCompression] = useState(90);
   const [moderation, setModeration] = useState("auto");
@@ -372,6 +374,7 @@ export default function App() {
           prompt,
           size: selectedSize,
           quality,
+          n: imageCount,
           outputFormat,
           outputCompression: compressionEnabled ? outputCompression : null,
           moderation,
@@ -551,6 +554,7 @@ export default function App() {
       if (Number.isFinite(height)) setCustomHeight(height);
     }
     setQuality(detail.generation.quality);
+    setImageCount(imageCountFromGeneration(detail));
     setOutputFormat(detail.generation.outputFormat);
     await loadPreview(detail);
   }
@@ -895,6 +899,16 @@ export default function App() {
                     ))}
                   </select>
                 </Field>
+                <Field label="Images">
+                  <input
+                    type="number"
+                    min={1}
+                    max={10}
+                    step={1}
+                    value={imageCount}
+                    onChange={(event) => setImageCount(clampImageCount(Number(event.target.value)))}
+                  />
+                </Field>
                 <Field label="Format">
                   <select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>
                     {formats.map((item) => (
@@ -944,7 +958,7 @@ export default function App() {
                 <button className="primaryButton" onClick={generateImage} disabled={isGenerating}>
                   {isGenerating ? "Working" : generationMode === "edit" ? "Edit image" : "Generate image"}
                 </button>
-                <span>{generationMode} · {selectedSize} · {quality} · {outputFormat}</span>
+                <span>{generationMode} · {selectedSize} · {quality} · {imageCount} image{imageCount === 1 ? "" : "s"} · {outputFormat}</span>
               </div>
             </section>
 
@@ -1078,6 +1092,7 @@ function GalleryHistoryView(props: {
                 <div className="galleryStats">
                   <span>{detail.generation.model}</span>
                   <span>{detail.generation.size}</span>
+                  {detail.outputs.length > 1 && <span>{detail.outputs.length} outputs</span>}
                   {detail.inputImages.length > 0 && <span>{detail.inputImages.length} input image{detail.inputImages.length > 1 ? "s" : ""}</span>}
                   <span>{formatTime(detail.generation.createdAt)}</span>
                 </div>
@@ -1331,6 +1346,70 @@ function InputImagesSection(props: { images: GenerationInputImage[] }) {
   );
 }
 
+function OutputImagesSection(props: { outputs: GenerationOutput[] }) {
+  const [dataUrls, setDataUrls] = useState<Record<number, string>>({});
+  const outputKey = props.outputs.map((output) => `${output.id}:${output.path}`).join("|");
+
+  useEffect(() => {
+    if (props.outputs.length === 0) {
+      setDataUrls({});
+      return;
+    }
+
+    let cancelled = false;
+    setDataUrls({});
+    void Promise.all(
+      props.outputs.map(async (output) => {
+        try {
+          const dataUrl = await invoke<string>("read_image_data_url", { path: output.path });
+          return [output.id, dataUrl] as const;
+        } catch {
+          return [output.id, ""] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      setDataUrls(Object.fromEntries(entries));
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [outputKey]);
+
+  if (props.outputs.length === 0) {
+    return (
+      <section className="detailSection outputImagesSection">
+        <h3>Outputs</h3>
+        <p className="emptyDetailText">No output images</p>
+      </section>
+    );
+  }
+
+  return (
+    <section className="detailSection outputImagesSection">
+      <h3>Outputs</h3>
+      <div className="inputImageGrid">
+        {props.outputs.map((output) => (
+          <figure key={output.id} className="inputImageCard">
+            <div className="inputImagePreview">
+              {dataUrls[output.id] ? (
+                <img src={dataUrls[output.id]} alt={`Output ${output.outputIndex + 1}`} />
+              ) : (
+                <span>Unable to preview</span>
+              )}
+            </div>
+            <figcaption>
+              <strong>Output {output.outputIndex + 1}</strong>
+              <small>{output.format} · {formatBytes(output.fileSize)}</small>
+            </figcaption>
+          </figure>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function GenerationDetailModal(props: {
   detail: GenerationDetail;
   onClose: () => void;
@@ -1366,8 +1445,12 @@ function GenerationDetailModal(props: {
           </section>
 
           <div className="detailInfoRow">
-            <InputImagesSection images={props.detail.inputImages} />
+            <OutputImagesSection outputs={props.detail.outputs} />
 
+            <InputImagesSection images={props.detail.inputImages} />
+          </div>
+
+          <div className="detailInfoRow">
             <section className="detailSection metadataSection">
               <h3>Metadata</h3>
               <dl>
@@ -1381,6 +1464,8 @@ function GenerationDetailModal(props: {
                 <dd>{props.detail.generation.quality}</dd>
                 <dt>Format</dt>
                 <dd>{props.detail.generation.outputFormat}</dd>
+                <dt>Outputs</dt>
+                <dd>{props.detail.outputs.length || "-"}</dd>
                 <dt>Completed</dt>
                 <dd>{props.detail.generation.completedAt ? formatTime(props.detail.generation.completedAt) : "-"}</dd>
               </dl>
@@ -1440,6 +1525,8 @@ function Inspector(props: {
           <dd>{props.detail?.generation.size ?? "-"}</dd>
           <dt>Format</dt>
           <dd>{props.detail?.generation.outputFormat ?? "-"}</dd>
+          <dt>Outputs</dt>
+          <dd>{props.detail?.outputs.length ?? "-"}</dd>
           <dt>File</dt>
           <dd>{output ? compactPath(output.path) : "-"}</dd>
         </dl>
@@ -1570,6 +1657,17 @@ function knownSize(value: string) {
   return sizes.includes(value);
 }
 
+function imageCountFromGeneration(detail: GenerationDetail) {
+  try {
+    const value = JSON.parse(detail.generation.paramsJson);
+    const count = typeof value?.body?.n === "number" ? value.body.n : value?.n;
+    if (typeof count === "number") return clampImageCount(count);
+  } catch {
+    // Fall back to saved outputs below.
+  }
+  return detail.outputs.length > 1 ? clampImageCount(detail.outputs.length) : defaultImageCount;
+}
+
 async function loadHistoryInputImages(detail: GenerationDetail): Promise<EditInputImage[]> {
   const images = [...detail.inputImages].sort((a, b) => a.inputIndex - b.inputIndex);
   return Promise.all(
@@ -1639,6 +1737,11 @@ function prettyJson(value: string) {
 function clampTimeoutMinutes(value: number) {
   if (!Number.isFinite(value)) return 15;
   return Math.min(120, Math.max(1, Math.round(value)));
+}
+
+function clampImageCount(value: number) {
+  if (!Number.isFinite(value)) return defaultImageCount;
+  return Math.min(10, Math.max(1, Math.round(value)));
 }
 
 function wait(ms: number) {

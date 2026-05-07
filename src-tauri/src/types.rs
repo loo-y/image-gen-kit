@@ -115,6 +115,7 @@ pub struct GenerateImageRequest {
     pub prompt: String,
     pub size: String,
     pub quality: String,
+    pub n: Option<i64>,
     pub output_format: String,
     pub output_compression: Option<i64>,
     pub moderation: Option<String>,
