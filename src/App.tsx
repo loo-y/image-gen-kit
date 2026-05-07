@@ -49,6 +49,7 @@ type GenerationInputImage = {
   id: number;
   generationId: string;
   path: string;
+  contentHash: string;
   name: string;
   mimeType: string;
   fileSize: number;
@@ -679,7 +680,7 @@ export default function App() {
   return (
     <main className="shell">
       <aside className="rail">
-        <div className="brandMark">IG</div>
+        <div className="brandMark">IGK</div>
         <button
           className={activeView === "generate" ? "railButton active" : "railButton"}
           onClick={() => setActiveView("generate")}
@@ -1216,6 +1217,8 @@ function HistoryView(props: {
   selectedId?: string;
   onSelect: (detail: GenerationDetail) => void;
 }) {
+  const visibleHistory = props.history.slice(0, 10);
+
   return (
     <section className="historyPane">
       <div className="historyHeader">
@@ -1227,7 +1230,7 @@ function HistoryView(props: {
         />
       </div>
       <div className="historyList">
-        {props.history.map((detail) => (
+        {visibleHistory.map((detail) => (
           <button
             key={detail.generation.id}
             className={props.selectedId === detail.generation.id ? "historyItem selected" : "historyItem"}
@@ -1445,12 +1448,6 @@ function GenerationDetailModal(props: {
           </section>
 
           <div className="detailInfoRow">
-            <OutputImagesSection outputs={props.detail.outputs} />
-
-            <InputImagesSection images={props.detail.inputImages} />
-          </div>
-
-          <div className="detailInfoRow">
             <section className="detailSection metadataSection">
               <h3>Metadata</h3>
               <dl>
@@ -1470,7 +1467,11 @@ function GenerationDetailModal(props: {
                 <dd>{props.detail.generation.completedAt ? formatTime(props.detail.generation.completedAt) : "-"}</dd>
               </dl>
             </section>
+
+            <InputImagesSection images={props.detail.inputImages} />
           </div>
+
+          <OutputImagesSection outputs={props.detail.outputs} />
 
           {props.detail.generation.errorMessage && (
             <section className="detailSection errorDetail">

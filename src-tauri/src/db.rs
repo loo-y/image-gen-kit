@@ -60,6 +60,7 @@ pub fn init_database() -> Result<(), String> {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             generation_id TEXT NOT NULL,
             path TEXT NOT NULL,
+            content_hash TEXT NOT NULL DEFAULT '',
             name TEXT NOT NULL,
             mime_type TEXT NOT NULL,
             file_size INTEGER NOT NULL,
@@ -80,6 +81,12 @@ pub fn init_database() -> Result<(), String> {
         "INTEGER NOT NULL DEFAULT 15",
     )?;
     ensure_column(&db, "generations", "response_json", "TEXT")?;
+    ensure_column(
+        &db,
+        "generation_input_images",
+        "content_hash",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     ensure_default_profile(&db)
 }
 
@@ -306,18 +313,19 @@ pub fn insert_input_image(input: &GenerationInputImage) -> Result<(), String> {
     let mut stmt = db.prepare(
         r#"
         INSERT INTO generation_input_images (
-            generation_id, path, name, mime_type, file_size, input_index, created_at
+            generation_id, path, content_hash, name, mime_type, file_size, input_index, created_at
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
         "#,
     )?;
     stmt.bind_text(1, &input.generation_id)?;
     stmt.bind_text(2, &input.path)?;
-    stmt.bind_text(3, &input.name)?;
-    stmt.bind_text(4, &input.mime_type)?;
-    stmt.bind_i64(5, input.file_size)?;
-    stmt.bind_i64(6, input.input_index)?;
-    stmt.bind_i64(7, input.created_at)?;
+    stmt.bind_text(3, &input.content_hash)?;
+    stmt.bind_text(4, &input.name)?;
+    stmt.bind_text(5, &input.mime_type)?;
+    stmt.bind_i64(6, input.file_size)?;
+    stmt.bind_i64(7, input.input_index)?;
+    stmt.bind_i64(8, input.created_at)?;
     stmt.step()?;
     Ok(())
 }
@@ -430,7 +438,7 @@ pub fn list_input_images(generation_id: &str) -> Result<Vec<GenerationInputImage
     let db = open()?;
     let mut stmt = db.prepare(
         r#"
-        SELECT id, generation_id, path, name, mime_type, file_size, input_index, created_at
+        SELECT id, generation_id, path, content_hash, name, mime_type, file_size, input_index, created_at
         FROM generation_input_images
         WHERE generation_id = ?1
         ORDER BY input_index ASC
@@ -447,12 +455,7 @@ pub fn list_input_images(generation_id: &str) -> Result<Vec<GenerationInputImage
 pub fn delete_generation(id: &str) -> Result<Vec<String>, String> {
     init_database()?;
     let outputs = list_outputs(id)?;
-    let inputs = list_input_images(id)?;
-    let paths = outputs
-        .into_iter()
-        .map(|output| output.path)
-        .chain(inputs.into_iter().map(|input| input.path))
-        .collect();
+    let paths = outputs.into_iter().map(|output| output.path).collect();
     let db = open()?;
     let mut stmt = db.prepare("DELETE FROM generations WHERE id = ?1")?;
     stmt.bind_text(1, id)?;
@@ -548,11 +551,12 @@ fn input_image_from_stmt(stmt: &crate::sqlite::Statement<'_>) -> GenerationInput
         id: stmt.column_i64(0),
         generation_id: stmt.column_text(1).unwrap_or_default(),
         path: stmt.column_text(2).unwrap_or_default(),
-        name: stmt.column_text(3).unwrap_or_default(),
-        mime_type: stmt.column_text(4).unwrap_or_default(),
-        file_size: stmt.column_i64(5),
-        input_index: stmt.column_i64(6),
-        created_at: stmt.column_i64(7),
+        content_hash: stmt.column_text(3).unwrap_or_default(),
+        name: stmt.column_text(4).unwrap_or_default(),
+        mime_type: stmt.column_text(5).unwrap_or_default(),
+        file_size: stmt.column_i64(6),
+        input_index: stmt.column_i64(7),
+        created_at: stmt.column_i64(8),
     }
 }
 

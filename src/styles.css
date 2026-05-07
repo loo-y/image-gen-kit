@@ -44,10 +44,16 @@ input:disabled {
 }
 
 .rail {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 2;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  width: 112px;
+  height: 100vh;
   padding: 18px 14px;
+  overflow-y: auto;
   background: #171717;
   color: #f7f2e8;
 }
@@ -62,6 +68,7 @@ input:disabled {
   border-radius: 8px;
   background: #f4c15d;
   color: #171717;
+  font-size: 14px;
   font-weight: 800;
 }
 
@@ -82,9 +89,11 @@ input:disabled {
 }
 
 .workspace {
+  grid-column: 2;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 100vh;
   padding: 22px;
   gap: 16px;
 }
@@ -144,6 +153,7 @@ input:disabled {
 .contentGrid {
   display: grid;
   grid-template-columns: minmax(360px, 0.95fr) minmax(280px, 0.72fr) minmax(340px, 0.8fr);
+  align-items: start;
   gap: 16px;
   min-height: 0;
   flex: 1;
@@ -489,8 +499,11 @@ select:focus {
 }
 
 .historyPane {
+  align-self: start;
   display: flex;
   flex-direction: column;
+  height: calc(100vh - 124px);
+  max-height: calc(100vh - 124px);
   padding: 14px;
   gap: 12px;
   overflow: hidden;
@@ -499,8 +512,11 @@ select:focus {
 .historyList {
   display: flex;
   flex-direction: column;
+  flex: 1;
   gap: 8px;
-  overflow: auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 2px;
 }
 
@@ -962,7 +978,7 @@ select:focus {
 }
 
 .detailInfoRow {
-  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  grid-template-columns: minmax(240px, 1fr) minmax(0, 2fr);
   align-items: stretch;
 }
 
@@ -994,9 +1010,19 @@ select:focus {
   display: flex;
   gap: 10px;
   min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding-bottom: 4px;
+}
+
+.inputImagesSection {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.outputImagesSection {
+  min-width: 0;
 }
 
 .inputImageCard {
@@ -1213,6 +1239,10 @@ dd {
 
   .shell {
     grid-template-columns: 94px minmax(0, 1fr);
+  }
+
+  .rail {
+    width: 94px;
   }
 
   .contentGrid {

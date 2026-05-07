@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use base64::{engine::general_purpose, Engine as _};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::app_paths;
 use crate::db;
@@ -333,7 +334,7 @@ fn persist_outputs(
 
     let mut outputs = Vec::new();
     let now = crate::commands::now_millis();
-    let dir = app_paths::generation_image_dir(now)?;
+    let dir = app_paths::generation_output_image_dir(now)?;
     let revised_prompt = response
         .data
         .iter()
@@ -376,7 +377,6 @@ fn persist_input_images(
     }
 
     let now = crate::commands::now_millis();
-    let dir = app_paths::generation_image_dir(now)?;
     let mut persisted = Vec::new();
 
     for (index, image) in input_images.iter().enumerate() {
@@ -386,13 +386,17 @@ fn persist_input_images(
             .map(normalize_format)
             .unwrap_or_else(|| "png".to_string());
         let extension = extension_for_format(&format);
-        let path = dir.join(format!("{generation_id}-input-{index}.{extension}"));
-        std::fs::write(&path, &image.bytes).map_err(|err| err.to_string())?;
+        let content_hash = content_hash_hex(&image.bytes);
+        let path = app_paths::input_images_dir()?.join(format!("{content_hash}.{extension}"));
+        if !path.exists() {
+            std::fs::write(&path, &image.bytes).map_err(|err| err.to_string())?;
+        }
 
         let input = GenerationInputImage {
             id: 0,
             generation_id: generation_id.to_string(),
             path: path.to_string_lossy().to_string(),
+            content_hash,
             name: image.name.clone(),
             mime_type: image.mime_type.clone(),
             file_size: image.bytes.len() as i64,
@@ -404,6 +408,10 @@ fn persist_input_images(
     }
 
     Ok(persisted)
+}
+
+fn content_hash_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 pub fn image_generation_url(base_url: &str) -> Result<String, String> {

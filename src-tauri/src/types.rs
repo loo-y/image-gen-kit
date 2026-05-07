@@ -75,6 +75,7 @@ pub struct GenerationInputImage {
     pub id: i64,
     pub generation_id: String,
     pub path: String,
+    pub content_hash: String,
     pub name: String,
     pub mime_type: String,
     pub file_size: i64,
