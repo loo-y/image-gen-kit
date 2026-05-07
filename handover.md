@@ -1,5 +1,134 @@
 # Image Gen Kit 交接记录
 
+## 2026-05-07 输入图去重、多输出预览与 Generate 布局修复
+
+### 1. 本次会话目标 / 当前阶段目标
+
+本次目标是修正 Image Edit 和 History 在真实使用中的几个可扩展性问题：多张输出图在 Detail/Preview 中应可见，图生图输入原图不应每次重复复制，输入图和输出图不应混在同一个目录，Generate 页左侧导航和右侧 History 应在生成时保持稳定。当前改动是阶段性长期方案：输入图按内容哈希复用，输出图仍按生成月份归档；后续如需清理孤儿输入图，需要单独做引用计数或 GC。
+
+### 2. 当前仓库状态
+
+- 当前分支：`main`。
+- 当前远端：`origin git@github.com:loo-y/image-gen-kit.git`。
+- 当前最新提交：`089d6447838544ac515b2b4ad568d1685a938e11`，已推送到 `origin/main`。
+- 本次主要改动文件：`src-tauri/src/app_paths.rs`、`src-tauri/src/providers/openai.rs`、`src-tauri/src/db.rs`、`src-tauri/src/types.rs`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src/App.tsx`、`src/styles.css`。
+- 当前 Windows NSIS 安装包路径：`src-tauri/target/release/bundle/nsis/Image Gen Kit_0.1.0_x64-setup.exe`。
+- 当前 Windows NSIS 安装包 SHA256：`680CBBC541C3A96C0A72971A04769A581ABA848F25DBDEDFF9F44D03C5F97C0D`。
+- 本文档更新发生在代码提交之后，作为单独文档同步提交进入远端历史。
+
+### 3. 今天实际遇到的问题
+
+1. History Detail 之前把 input 和 output 放在同一块区域，多输出场景下容易遗漏输出图展示；用户明确指出 output 多张时 Preview/Detail 需要考虑。
+2. Image Edit 输入图和输出图都写到同一个 `images/<month>` 目录，目录语义混乱，不利于排查和后续清理。
+3. 同一张输入图被多次用于图生图时，每次都会复制一个新的 input 文件，磁盘浪费明显。
+4. 旧的删除逻辑会在删除某一条 generation 时同时删除输入图；输入图改为共享引用后，这种删除方式会误删其他历史仍在引用的原图。
+5. 左侧侧边栏会随页面滚动；Generate 页点击 `Generate image` 后，旁边 History 面板高度会被同一 Grid 行里的 Composer/Inspector 内容撑高。
+6. Generate 页 History 需要最多显示 10 条；超过可视高度时，应在 History 模块内部滚动，而不是撑开整个应用。
+7. 左上角品牌标识仍是 `IG`，用户要求改成 `IGK`。
+
+### 4. 原因判断与结论
+
+- 输入图重复来自文件命名策略：之前按 generation id 和 input index 生成文件名，所以相同内容无法复用。
+- 输入/输出目录混乱来自 `generation_image_dir` 同时服务 input 和 output；应拆成 `images/inputs` 和 `images/outputs/<bucket>`。
+- 输入图共享后，删除 generation 时不能再直接删除 input 文件；当前正确做法是只删除 output 文件和 DB generation 记录，保留共享输入图。
+- History 高度问题来自 CSS Grid 默认 `align-items: stretch` 和 history 面板只有 `max-height` 没有固定 `height`；生成后其他列变高会影响同一行视觉高度。
+- 当前未做自动 GC 是有意约束：没有引用计数前，不应猜测某个 input 文件是否可删。
+
+### 5. 这次已经落地的修复
+
+- `src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`
+  - 新增 `sha2`，用于对输入图内容计算 SHA-256。
+
+- `src-tauri/src/app_paths.rs`
+  - 新增 `input_images_dir()`，输入图统一保存到 `images/inputs`。
+  - 新增 `output_images_dir()`，输出图统一保存到 `images/outputs`。
+  - 将输出图归档函数改为 `generation_output_image_dir()`，继续按月份 bucket 存放输出。
+
+- `src-tauri/src/providers/openai.rs`
+  - 保存输入图时使用内容 SHA-256 作为文件名，路径形如 `images/inputs/<hash>.<ext>`。
+  - 如果相同 hash 文件已经存在，不再重复写入。
+  - 输出图保存改走 `generation_output_image_dir()`，不再和输入图混目录。
+
+- `src-tauri/src/db.rs`、`src-tauri/src/types.rs`
+  - `generation_input_images` 增加 `content_hash` 字段，并用 `ensure_column` 兼容已有数据库。
+  - `GenerationInputImage` 类型增加 `content_hash`。
+  - 删除 generation 时只返回输出图路径用于删除，不再删除共享 input 文件。
+
+- `src/App.tsx`
+  - 左上角品牌从 `IG` 改为 `IGK`。
+  - Generate 页 History 只渲染最新 10 条。
+  - Detail 中 Metadata 和 Input Images 同行展示，Output Images 单独展示，支持多输出记录。
+
+- `src/styles.css`
+  - 左侧 rail 改为固定定位，宽度随响应式断点保持 112px/94px。
+  - Generate 三列 Grid 改为 `align-items: start`，避免 History 被其他列撑高。
+  - History 面板固定 `height: calc(100vh - 124px)`，内部列表 `flex: 1` 并独立纵向滚动。
+  - Input Images 区域固定在可用宽度内，图片多时内部横向滚动。
+
+### 6. 已验证结果
+
+本阶段实际验证通过：
+
+- `cmd /c npm run build`：TypeScript 和 Vite production build 通过。
+- `cargo fmt --check`：Rust 格式检查通过。
+- `cargo check`：Rust 类型检查通过。
+- `cargo test`：11 个 Rust 单元测试通过。
+- `cmd /c npm run tauri -- build --ci --no-sign`：Windows release binary 和 NSIS 安装包生成成功。
+- 最后一次安装包 SHA256：`680CBBC541C3A96C0A72971A04769A581ABA848F25DBDEDFF9F44D03C5F97C0D`。
+
+未验证：
+
+- 未安装最新 NSIS 包做人工 UI 回归。
+- 未用真实 OpenAI API key 验证多输出图、输入图复用和删除历史后的文件保留行为。
+- 未验证长期使用后 `images/inputs` 中孤儿文件的清理策略。
+
+### 7. 踩过的坑 / 已否定方案 / 关键约束
+
+- 不要继续按 generation id 复制 input 文件；这会让同一张源图被多次保存。
+- 不要在删除某条 generation 时直接删除 input 图；输入图现在是共享资源，除非先实现引用计数或 GC。
+- 不要把 input 和 output 重新放回同一个目录；排障时会难以区分源图和生成结果。
+- 不要只给 History 加 `max-height`；CSS Grid stretch 仍可能让视觉高度被其他列影响，必须固定 `height` 并设置 Grid 对齐。
+- 当前 `content_hash` 是按图片字节算的，文件名不同但内容相同会复用；内容经过重编码后 hash 会不同，这是预期边界。
+
+### 8. 接手后如何继续
+
+1. 先看 `src-tauri/src/providers/openai.rs` 的 `persist_input_images()`，确认输入图 hash 命名和不重复写入的行为。
+2. 再看 `src-tauri/src/db.rs` 的 `delete_generation()`，确认删除历史只清理输出图。
+3. 看 `src-tauri/src/app_paths.rs`，确认输入输出目录拆分规则。
+4. 看 `src/App.tsx` 的 `HistoryView` 和 `GenerationDetailModal`，确认 Generate 页 History 限制 10 条，以及 Detail 多输出展示。
+5. 看 `src/styles.css` 的 `.rail`、`.contentGrid`、`.historyPane`、`.historyList`，确认固定侧边栏和 History 内部滚动。
+6. 本地验证建议先跑 `cmd /c npm run build`、`cargo test`、`cargo check`。
+7. 如果继续发包，跑 `cmd /c npm run tauri -- build --ci --no-sign` 并记录新的 installer SHA256。
+
+### 9. 当前仍存在的问题 / 边界
+
+- `images/inputs` 暂无孤儿文件清理；这是为了避免误删共享输入图。
+- 旧历史记录中已复制到旧路径的 input 文件不会自动迁移到 `images/inputs`。
+- History Preview 对多输出图的交互仍可继续增强，例如在 modal 内切换多张 output；当前重点是 Detail 能完整展示多输出。
+- 安装包仍未签名。
+- 仍未做真实 API 端到端回归。
+
+### 10. 最终想实现的产品目标
+
+最终目标仍是普通用户可安装的桌面图片生成和编辑工具：输入图、输出图、请求参数、响应和错误信息都应可追溯；相同输入图应可复用而不浪费磁盘；History 在长任务、多图、多历史记录场景下应保持稳定可读。当前版本已经把存储模型向这个目标推进了一步，但还需要真实 API 回归、安装包签名和输入图 GC。
+
+### 11. 后续 TODO
+
+1. 实现输入图引用计数或安全 GC。
+   - 目的：清理 `images/inputs` 中不再被任何 `generation_input_images` 引用的文件，避免长期使用后磁盘无限增长。
+
+2. 做真实 API 多图回归。
+   - 目的：验证多输出 response、Detail 输出展示、输入图 hash 复用、删除历史后的文件保留行为都符合预期。
+
+3. 增强 Preview 多输出切换。
+   - 目的：当一次请求有多张 output 时，用户不只在 Detail 看列表，也能在 Preview modal 中切换查看。
+
+4. 为已有旧数据设计迁移策略。
+   - 目的：如果用户已经有旧版图生图历史，评估是否需要把旧 input 文件迁移到 `images/inputs` 并补齐 `content_hash`。
+
+5. 安装最新 NSIS 包做人工 UI 回归。
+   - 目的：确认固定侧边栏、Generate 页 History 固定高度、内部滚动、Detail 多输出和输入图横向滚动在真实 WebView 中表现正确。
+
 ## 2026-05-06 系统通知与托盘更新
 
 - 已新增系统通知：`src-tauri/src/commands.rs` 在后台 `start_generation` 任务结束后，根据 `openai::run_existing_job` 的成功/失败结果调用 `tauri-plugin-notification` 发送系统通知；通知内容包含模型、供应商、输出数量或失败摘要。
