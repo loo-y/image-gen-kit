@@ -93,13 +93,31 @@ const sizeOptions = [
   { value: "2160x3840", label: "2160x3840 (4K portrait)" },
   { value: "auto", label: "auto (default)" },
 ];
+const xaiAspectRatioOptions = [
+  { value: "auto", label: "auto" },
+  { value: "1:1", label: "1:1 (square)" },
+  { value: "16:9", label: "16:9 (landscape)" },
+  { value: "9:16", label: "9:16 (portrait)" },
+  { value: "4:3", label: "4:3" },
+  { value: "3:4", label: "3:4" },
+  { value: "3:2", label: "3:2" },
+  { value: "2:3", label: "2:3" },
+  { value: "2:1", label: "2:1" },
+  { value: "1:2", label: "1:2" },
+  { value: "19.5:9", label: "19.5:9" },
+  { value: "9:19.5", label: "9:19.5" },
+  { value: "20:9", label: "20:9" },
+  { value: "9:20", label: "9:20" },
+];
 const sizes = [...sizeOptions.map((option) => option.value), "custom"];
 const qualities = ["auto", "low", "medium", "high"];
+const xaiResolutions = ["1k", "2k"];
 const formats = ["png", "jpeg", "webp"];
 const moderationModes = ["auto", "low"];
 const defaultImageCount = 1;
 const providerTypeOptions = [
   { value: "openai", label: "OpenAI compatible", disabled: false },
+  { value: "xai-grok", label: "xAI Grok Imagine", disabled: false },
   { value: "google-nano-banana", label: "Google Nano Banana (TODO)", disabled: true },
 ];
 const generationPollIntervalMs = 2500;
@@ -121,6 +139,8 @@ export default function App() {
   const [networkTimeoutMinutes, setNetworkTimeoutMinutes] = useState(15);
   const [prompt, setPrompt] = useState("");
   const [size, setSize] = useState("auto");
+  const [xaiAspectRatio, setXaiAspectRatio] = useState("auto");
+  const [xaiResolution, setXaiResolution] = useState("1k");
   const [customWidth, setCustomWidth] = useState(1024);
   const [customHeight, setCustomHeight] = useState(1024);
   const [quality, setQuality] = useState("auto");
@@ -154,7 +174,10 @@ export default function App() {
     [deleteCandidateId, history],
   );
 
-  const selectedSize = size === "custom" ? `${customWidth}x${customHeight}` : size;
+  const isXaiProvider = providerType === "xai-grok";
+  const selectedSize = isXaiProvider ? xaiAspectRatio : size === "custom" ? `${customWidth}x${customHeight}` : size;
+  const selectedQuality = isXaiProvider ? xaiResolution : quality;
+  const effectiveMaxEditImages = isXaiProvider ? 3 : maxEditImages;
   const compressionEnabled = outputFormat === "jpeg" || outputFormat === "webp";
   const selectedIdRef = useRef<string | null>(null);
   const activeViewRef = useRef(activeView);
@@ -349,6 +372,10 @@ export default function App() {
       setError("Add at least one input image for image edit");
       return;
     }
+    if (generationMode === "edit" && editImages.length > effectiveMaxEditImages) {
+      setError(`${providerLabel(providerType)} supports up to ${effectiveMaxEditImages} input images for image edit`);
+      return;
+    }
     setIsGenerating(true);
     setError("");
     setNotice("");
@@ -374,11 +401,12 @@ export default function App() {
           model,
           prompt,
           size: selectedSize,
-          quality,
+          quality: selectedQuality,
+          xaiResolution: isXaiProvider ? xaiResolution : null,
           n: imageCount,
           outputFormat,
-          outputCompression: compressionEnabled ? outputCompression : null,
-          moderation,
+          outputCompression: !isXaiProvider && compressionEnabled ? outputCompression : null,
+          moderation: isXaiProvider ? null : moderation,
           debugMode,
           networkTimeoutMinutes,
           inputImages: generationMode === "edit"
@@ -407,14 +435,24 @@ export default function App() {
     setActiveProfileId("");
     setProviderAlias(uniqueProviderAlias("OpenAI", profiles));
     setProviderType("openai");
-    setBaseUrl("https://api.openai.com/v1");
-    setModel("gpt-image-2");
+    setBaseUrl(defaultBaseUrlForProvider("openai"));
+    setModel(defaultModelForProvider("openai"));
     setNetworkTimeoutMinutes(15);
     setApiKey("");
     setSaveApiKey(false);
     setActiveView("settings");
     setNotice("Configure the new provider, then save settings");
     setError("");
+  }
+
+  function changeProviderType(value: string) {
+    setProviderType(value);
+    setBaseUrl(defaultBaseUrlForProvider(value));
+    setModel(defaultModelForProvider(value));
+    if (value === "xai-grok") {
+      setXaiAspectRatio("auto");
+      setXaiResolution("1k");
+    }
   }
 
   async function addEditImages(event: React.ChangeEvent<HTMLInputElement>) {
@@ -439,8 +477,8 @@ export default function App() {
   function appendEditImages(images: EditInputImagePayload[], source: string) {
     if (images.length === 0) return;
     const current = editImagesRef.current;
-    if (current.length + images.length > maxEditImages) {
-      setError(`Image edit supports up to ${maxEditImages} input images`);
+    if (current.length + images.length > effectiveMaxEditImages) {
+      setError(`${providerLabel(providerType)} image edit supports up to ${effectiveMaxEditImages} input images`);
       return;
     }
     const next = [
@@ -745,7 +783,7 @@ export default function App() {
             providerAlias={providerAlias}
             setProviderAlias={setProviderAlias}
             providerType={providerType}
-            setProviderType={setProviderType}
+            setProviderType={changeProviderType}
             baseUrl={baseUrl}
             setBaseUrl={setBaseUrl}
             model={model}
@@ -822,7 +860,7 @@ export default function App() {
                         onChange={addEditImages}
                       />
                       <span>{isImageDropActive ? "Drop images here" : "Choose or drop input images"}</span>
-                      <small>PNG, JPEG, or WebP · paste with Ctrl+V · up to {maxEditImages} files</small>
+                      <small>PNG, JPEG, or WebP · paste with Ctrl+V · up to {effectiveMaxEditImages} files</small>
                     </label>
                     <button type="button" className="pasteImageButton" onClick={pasteEditImages}>
                       Paste image
@@ -857,49 +895,74 @@ export default function App() {
                 <Field label="Model">
                   <input value={model} onChange={(event) => setModel(event.target.value)} />
                 </Field>
-                <Field label="Size">
-                  <select value={size} onChange={(event) => setSize(event.target.value)}>
-                    {sizeOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                    <option value="custom">custom</option>
-                  </select>
-                </Field>
-                {size === "custom" && (
+                {isXaiProvider ? (
                   <>
-                    <Field label="Width">
-                      <input
-                        type="number"
-                        min={256}
-                        max={3840}
-                        step={16}
-                        value={customWidth}
-                        onChange={(event) => setCustomWidth(Number(event.target.value))}
-                      />
+                    <Field label="Aspect ratio">
+                      <select value={xaiAspectRatio} onChange={(event) => setXaiAspectRatio(event.target.value)}>
+                        {xaiAspectRatioOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
                     </Field>
-                    <Field label="Height">
-                      <input
-                        type="number"
-                        min={256}
-                        max={3840}
-                        step={16}
-                        value={customHeight}
-                        onChange={(event) => setCustomHeight(Number(event.target.value))}
-                      />
+                    <Field label="Resolution">
+                      <select value={xaiResolution} onChange={(event) => setXaiResolution(event.target.value)}>
+                        {xaiResolutions.map((item) => (
+                          <option key={item} value={item}>
+                            {item}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  </>
+                ) : (
+                  <>
+                    <Field label="Size">
+                      <select value={size} onChange={(event) => setSize(event.target.value)}>
+                        {sizeOptions.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                        <option value="custom">custom</option>
+                      </select>
+                    </Field>
+                    {size === "custom" && (
+                      <>
+                        <Field label="Width">
+                          <input
+                            type="number"
+                            min={256}
+                            max={3840}
+                            step={16}
+                            value={customWidth}
+                            onChange={(event) => setCustomWidth(Number(event.target.value))}
+                          />
+                        </Field>
+                        <Field label="Height">
+                          <input
+                            type="number"
+                            min={256}
+                            max={3840}
+                            step={16}
+                            value={customHeight}
+                            onChange={(event) => setCustomHeight(Number(event.target.value))}
+                          />
+                        </Field>
+                      </>
+                    )}
+                    <Field label="Quality">
+                      <select value={quality} onChange={(event) => setQuality(event.target.value)}>
+                        {qualities.map((item) => (
+                          <option key={item} value={item}>
+                            {item}
+                          </option>
+                        ))}
+                      </select>
                     </Field>
                   </>
                 )}
-                <Field label="Quality">
-                  <select value={quality} onChange={(event) => setQuality(event.target.value)}>
-                    {qualities.map((item) => (
-                      <option key={item} value={item}>
-                        {item}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
                 <Field label="Images">
                   <input
                     type="number"
@@ -910,35 +973,39 @@ export default function App() {
                     onChange={(event) => setImageCount(clampImageCount(Number(event.target.value)))}
                   />
                 </Field>
-                <Field label="Format">
-                  <select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>
-                    {formats.map((item) => (
-                      <option key={item} value={item}>
-                        {item}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-                <Field label="Compression">
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={outputCompression}
-                    disabled={!compressionEnabled}
-                    onChange={(event) => setOutputCompression(Number(event.target.value))}
-                  />
-                  <span className="rangeValue">{compressionEnabled ? outputCompression : "png"}</span>
-                </Field>
-                <Field label="Moderation">
-                  <select value={moderation} onChange={(event) => setModeration(event.target.value)}>
-                    {moderationModes.map((item) => (
-                      <option key={item} value={item}>
-                        {item}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
+                {!isXaiProvider && (
+                  <>
+                    <Field label="Format">
+                      <select value={outputFormat} onChange={(event) => setOutputFormat(event.target.value)}>
+                        {formats.map((item) => (
+                          <option key={item} value={item}>
+                            {item}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                    <Field label="Compression">
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={outputCompression}
+                        disabled={!compressionEnabled}
+                        onChange={(event) => setOutputCompression(Number(event.target.value))}
+                      />
+                      <span className="rangeValue">{compressionEnabled ? outputCompression : "png"}</span>
+                    </Field>
+                    <Field label="Moderation">
+                      <select value={moderation} onChange={(event) => setModeration(event.target.value)}>
+                        {moderationModes.map((item) => (
+                          <option key={item} value={item}>
+                            {item}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
+                  </>
+                )}
               </div>
 
               <div className="debugRow">
@@ -959,7 +1026,7 @@ export default function App() {
                 <button className="primaryButton" onClick={generateImage} disabled={isGenerating}>
                   {isGenerating ? "Working" : generationMode === "edit" ? "Edit image" : "Generate image"}
                 </button>
-                <span>{generationMode} · {selectedSize} · {quality} · {imageCount} image{imageCount === 1 ? "" : "s"} · {outputFormat}</span>
+                <span>{generationMode} · {selectedSize} · {selectedQuality} · {imageCount} image{imageCount === 1 ? "" : "s"}{isXaiProvider ? "" : ` · ${outputFormat}`}</span>
               </div>
             </section>
 
@@ -1204,7 +1271,8 @@ function SettingsView(props: {
       <div className="providerNote">
         <h2>Provider model</h2>
         <p>Provider alias is the display name shown in the top-right switcher and history records.</p>
-        <p>Only OpenAI-compatible image generation is implemented now. Google Nano Banana is intentionally left as a provider-type TODO so it can be added without changing history records.</p>
+        <p>OpenAI-compatible providers support image generation and multipart image edit. xAI Grok Imagine supports generation and JSON image edit with up to 3 input images.</p>
+        <p>Google Nano Banana is intentionally left as a provider-type TODO so it can be added without changing history records.</p>
       </div>
     </section>
   );
@@ -1705,6 +1773,20 @@ function uniqueProviderAlias(base: string, profiles: ProviderProfile[]) {
     if (!names.has(candidate.toLowerCase())) return candidate;
   }
   return `${base} ${Date.now()}`;
+}
+
+function defaultBaseUrlForProvider(providerType: string) {
+  if (providerType === "xai-grok") return "https://api.x.ai/v1";
+  return "https://api.openai.com/v1";
+}
+
+function defaultModelForProvider(providerType: string) {
+  if (providerType === "xai-grok") return "grok-imagine-image-quality";
+  return "gpt-image-2";
+}
+
+function providerLabel(providerType: string) {
+  return providerTypeOptions.find((option) => option.value === providerType)?.label ?? providerType;
 }
 
 function formatTime(value: number) {

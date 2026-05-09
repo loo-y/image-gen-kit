@@ -359,6 +359,7 @@ fn prepare_openai_job(request: GenerateImageRequest) -> Result<openai::OpenAiJob
 
     match profile.profile.provider_type.as_str() {
         "openai" => openai::create_job(request, profile, api_key),
+        "xai-grok" => openai::create_xai_grok_job(request, profile, api_key),
         other => Err(format!("Provider type '{other}' is not implemented yet")),
     }
 }

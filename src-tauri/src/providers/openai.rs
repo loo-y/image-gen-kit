@@ -14,6 +14,7 @@ use crate::types::{
 };
 
 const MAX_EDIT_IMAGES: usize = 16;
+const MAX_XAI_EDIT_IMAGES: usize = 3;
 const MAX_EDIT_IMAGE_BYTES: usize = 50 * 1024 * 1024;
 
 pub struct OpenAiJob {
@@ -22,6 +23,7 @@ pub struct OpenAiJob {
     pub api_key: String,
     pub debug_mode: bool,
     pub timeout_seconds: u64,
+    provider_flavor: ProviderFlavor,
     pub endpoint: OpenAiEndpoint,
     pub params: Value,
     pub input_images: Vec<PreparedInputImage>,
@@ -31,6 +33,12 @@ pub struct OpenAiJob {
 pub enum OpenAiEndpoint {
     Generation,
     Edit,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderFlavor {
+    OpenAiCompatible,
+    XaiGrok,
 }
 
 pub struct PreparedInputImage {
@@ -44,12 +52,29 @@ pub fn create_job(
     profile: StoredProviderProfile,
     api_key: String,
 ) -> Result<OpenAiJob, String> {
+    create_job_for(request, profile, api_key, ProviderFlavor::OpenAiCompatible)
+}
+
+pub fn create_xai_grok_job(
+    request: GenerateImageRequest,
+    profile: StoredProviderProfile,
+    api_key: String,
+) -> Result<OpenAiJob, String> {
+    create_job_for(request, profile, api_key, ProviderFlavor::XaiGrok)
+}
+
+fn create_job_for(
+    request: GenerateImageRequest,
+    profile: StoredProviderProfile,
+    api_key: String,
+    provider_flavor: ProviderFlavor,
+) -> Result<OpenAiJob, String> {
     let timeout_minutes = validate_timeout_minutes(
         request
             .network_timeout_minutes
             .unwrap_or(profile.profile.network_timeout_minutes),
     )?;
-    let normalized = NormalizedRequest::from_request(request)?;
+    let normalized = NormalizedRequest::from_request(request, provider_flavor)?;
     let now = crate::commands::now_millis();
     let request_json = request_record_json(
         &profile.profile.base_url,
@@ -83,6 +108,7 @@ pub fn create_job(
         api_key,
         debug_mode: normalized.debug_mode,
         timeout_seconds: timeout_minutes as u64 * 60,
+        provider_flavor,
         endpoint: normalized.endpoint,
         params: normalized.api_params,
         input_images: normalized.input_images,
@@ -102,6 +128,7 @@ fn run_job_inner(job: OpenAiJob, insert_generation: bool) -> Result<GenerationDe
         output_format: job.generation.output_format.clone(),
         debug_mode: job.debug_mode,
         timeout_seconds: job.timeout_seconds,
+        provider_flavor: job.provider_flavor,
         endpoint: job.endpoint,
         params: job.params,
         input_images: job.input_images,
@@ -189,7 +216,12 @@ fn call_openai(
         OpenAiEndpoint::Generation => {
             call_openai_generation(base_url, api_key, normalized, debug_dir)
         }
-        OpenAiEndpoint::Edit => call_openai_edit(base_url, api_key, normalized, debug_dir),
+        OpenAiEndpoint::Edit => match normalized.provider_flavor {
+            ProviderFlavor::OpenAiCompatible => {
+                call_openai_edit(base_url, api_key, normalized, debug_dir)
+            }
+            ProviderFlavor::XaiGrok => call_xai_grok_edit(base_url, api_key, normalized, debug_dir),
+        },
     }
 }
 
@@ -311,6 +343,67 @@ fn call_openai_edit(
             write_debug_text(debug_dir, "transport-error.txt", &err.to_string());
             return Err(OpenAiCallError::new(format!(
                 "Image edit API request failed: {err}"
+            )));
+        }
+    };
+
+    let parsed = parse_image_response(&body).map_err(OpenAiCallError::new)?;
+    Ok(OpenAiCallResponse {
+        parsed,
+        body: response_body_json(&body),
+    })
+}
+
+fn call_xai_grok_edit(
+    base_url: &str,
+    api_key: &str,
+    normalized: &NormalizedJob,
+    debug_dir: Option<&Path>,
+) -> Result<OpenAiCallResponse, OpenAiCallError> {
+    let url = image_edit_url(base_url)?;
+    let body = xai_edit_json_body(&normalized.params, &normalized.input_images)?;
+    let payload = serde_json::to_string(&body).map_err(|err| err.to_string())?;
+    write_debug_json(
+        debug_dir,
+        "request.json",
+        &json!({
+            "method": "POST",
+            "url": url,
+            "headers": {
+                "authorization": "Bearer <redacted>",
+                "content-type": "application/json"
+            },
+            "body": xai_edit_debug_body(&normalized.params, &normalized.input_images)
+        }),
+    );
+    let response = ureq::post(&url)
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("Content-Type", "application/json")
+        .timeout(Duration::from_secs(normalized.timeout_seconds))
+        .send_string(&payload);
+
+    let body = match response {
+        Ok(response) => {
+            let status = response.status();
+            let body = response.into_string().map_err(|err| err.to_string())?;
+            write_debug_response(debug_dir, "response", status, &body);
+            body
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let body = response.into_string().unwrap_or_default();
+            write_debug_response(debug_dir, "http-error-response", code, &body);
+            return Err(OpenAiCallError::with_response(
+                format!(
+                    "xAI image edit API returned {code}: {}",
+                    api_error_message(&body)
+                ),
+                response_body_json(&body),
+            ));
+        }
+        Err(ureq::Error::Transport(err)) => {
+            write_debug_text(debug_dir, "transport-error.txt", &err.to_string());
+            return Err(OpenAiCallError::new(format!(
+                "xAI image edit API request failed: {err}"
             )));
         }
     };
@@ -595,17 +688,32 @@ struct NormalizedJob {
     output_format: String,
     debug_mode: bool,
     timeout_seconds: u64,
+    provider_flavor: ProviderFlavor,
     endpoint: OpenAiEndpoint,
     params: Value,
     input_images: Vec<PreparedInputImage>,
 }
 
 impl NormalizedRequest {
-    fn from_request(request: GenerateImageRequest) -> Result<Self, String> {
+    fn from_request(
+        request: GenerateImageRequest,
+        provider_flavor: ProviderFlavor,
+    ) -> Result<Self, String> {
         let model = required_trimmed(&request.model, "Model")?;
         let prompt = required_trimmed(&request.prompt, "Prompt")?;
-        let size = validate_size(&request.size)?;
-        let quality = validate_quality(&request.quality)?;
+        let size = match provider_flavor {
+            ProviderFlavor::OpenAiCompatible => validate_size(&request.size)?,
+            ProviderFlavor::XaiGrok => validate_xai_aspect_ratio(&request.size)?,
+        };
+        let quality = match provider_flavor {
+            ProviderFlavor::OpenAiCompatible => validate_quality(&request.quality)?,
+            ProviderFlavor::XaiGrok => validate_xai_resolution(
+                request
+                    .xai_resolution
+                    .as_deref()
+                    .unwrap_or(request.quality.as_str()),
+            )?,
+        };
         let image_count = validate_image_count(request.n)?;
         validate_model_image_count(&model, image_count)?;
         let output_format = validate_output_format(&request.output_format)?;
@@ -618,17 +726,39 @@ impl NormalizedRequest {
             OpenAiEndpoint::Edit
         };
 
-        let mut api_params = json!({
-            "model": model,
-            "prompt": prompt,
-            "size": size,
-            "quality": quality,
-            "output_format": output_format,
-            "moderation": moderation
-        });
+        if provider_flavor == ProviderFlavor::XaiGrok
+            && endpoint == OpenAiEndpoint::Edit
+            && input_images.len() > MAX_XAI_EDIT_IMAGES
+        {
+            return Err(format!(
+                "xAI Grok image edit supports up to {MAX_XAI_EDIT_IMAGES} input images"
+            ));
+        }
 
-        if let Some(compression) = compression {
-            api_params["output_compression"] = json!(compression);
+        let mut api_params = match provider_flavor {
+            ProviderFlavor::OpenAiCompatible => json!({
+                "model": model.clone(),
+                "prompt": prompt.clone(),
+                "size": size.clone(),
+                "quality": quality.clone(),
+                "output_format": output_format.clone(),
+                "moderation": moderation.clone()
+            }),
+            ProviderFlavor::XaiGrok => {
+                let mut params = json!({
+                    "model": model.clone(),
+                    "prompt": prompt.clone(),
+                    "response_format": "b64_json"
+                });
+                apply_xai_size_options(&mut params, &size, &quality, endpoint, input_images.len())?;
+                params
+            }
+        };
+
+        if provider_flavor == ProviderFlavor::OpenAiCompatible {
+            if let Some(compression) = compression {
+                api_params["output_compression"] = json!(compression);
+            }
         }
         if let Some(image_count) = image_count {
             api_params["n"] = json!(image_count);
@@ -663,6 +793,43 @@ impl NormalizedRequest {
             input_images,
         })
     }
+}
+
+fn apply_xai_size_options(
+    params: &mut Value,
+    aspect_ratio: &str,
+    resolution: &str,
+    endpoint: OpenAiEndpoint,
+    input_image_count: usize,
+) -> Result<(), String> {
+    params["resolution"] = json!(resolution);
+    if endpoint == OpenAiEndpoint::Edit && input_image_count == 1 {
+        return Ok(());
+    }
+    if aspect_ratio != "auto" && !is_supported_xai_aspect_ratio(aspect_ratio) {
+        return Err(format!("Unsupported xAI Grok aspect ratio: {aspect_ratio}"));
+    }
+    params["aspect_ratio"] = json!(aspect_ratio);
+    Ok(())
+}
+
+fn is_supported_xai_aspect_ratio(value: &str) -> bool {
+    matches!(
+        value,
+        "1:1"
+            | "16:9"
+            | "9:16"
+            | "4:3"
+            | "3:4"
+            | "3:2"
+            | "2:3"
+            | "2:1"
+            | "1:2"
+            | "19.5:9"
+            | "9:19.5"
+            | "20:9"
+            | "9:20"
+    )
 }
 
 fn prepare_input_images(images: Vec<InputImageRequest>) -> Result<Vec<PreparedInputImage>, String> {
@@ -833,6 +1000,69 @@ fn build_edit_multipart(
 
     body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
     Ok((body, boundary))
+}
+
+fn xai_edit_json_body(
+    params: &Value,
+    input_images: &[PreparedInputImage],
+) -> Result<Value, String> {
+    if input_images.is_empty() {
+        return Err("At least one input image is required for xAI image edits".to_string());
+    }
+    if input_images.len() > MAX_XAI_EDIT_IMAGES {
+        return Err(format!(
+            "xAI Grok image edit supports up to {MAX_XAI_EDIT_IMAGES} input images"
+        ));
+    }
+
+    let mut body = params
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "xAI image edit parameters must be an object".to_string())?;
+    if input_images.len() == 1 {
+        body.insert("image".to_string(), xai_image_reference(&input_images[0]));
+    } else {
+        body.insert(
+            "images".to_string(),
+            json!(input_images
+                .iter()
+                .map(xai_image_reference)
+                .collect::<Vec<_>>()),
+        );
+    }
+    Ok(Value::Object(body))
+}
+
+fn xai_edit_debug_body(params: &Value, input_images: &[PreparedInputImage]) -> Value {
+    let mut body = params.as_object().cloned().unwrap_or_default();
+    let image_metadata = input_images
+        .iter()
+        .map(|image| {
+            json!({
+                "type": "image_url",
+                "url": format!("<{} byte data URI redacted>", image.bytes.len()),
+                "mime_type": image.mime_type,
+                "name": image.name,
+            })
+        })
+        .collect::<Vec<_>>();
+    if image_metadata.len() == 1 {
+        body.insert("image".to_string(), image_metadata[0].clone());
+    } else {
+        body.insert("images".to_string(), json!(image_metadata));
+    }
+    Value::Object(body)
+}
+
+fn xai_image_reference(image: &PreparedInputImage) -> Value {
+    json!({
+        "type": "image_url",
+        "url": format!(
+            "data:{};base64,{}",
+            image.mime_type,
+            general_purpose::STANDARD.encode(&image.bytes)
+        )
+    })
 }
 
 fn multipart_field_value(value: &Value) -> Option<String> {
@@ -1095,6 +1325,22 @@ pub fn validate_size(value: &str) -> Result<String, String> {
     Ok(format!("{width}x{height}"))
 }
 
+fn validate_xai_aspect_ratio(value: &str) -> Result<String, String> {
+    let value = value.trim().to_lowercase();
+    if value == "auto" || is_supported_xai_aspect_ratio(&value) {
+        return Ok(value);
+    }
+    Err("xAI Grok aspect ratio must be auto, 1:1, 16:9, 9:16, 4:3, 3:4, 3:2, 2:3, 2:1, 1:2, 19.5:9, 9:19.5, 20:9, or 9:20".to_string())
+}
+
+fn validate_xai_resolution(value: &str) -> Result<String, String> {
+    let value = value.trim().to_lowercase();
+    match value.as_str() {
+        "1k" | "2k" => Ok(value),
+        _ => Err("xAI Grok resolution must be 1k or 2k".to_string()),
+    }
+}
+
 fn validate_quality(value: &str) -> Result<String, String> {
     let value = value.trim().to_lowercase();
     match value.as_str() {
@@ -1284,7 +1530,8 @@ fn read_jpeg_dimensions(bytes: &[u8]) -> (Option<i64>, Option<i64>) {
 mod tests {
     use super::{
         build_edit_multipart, image_edit_url, image_generation_url, parse_image_response,
-        validate_size, ImagePayload, NormalizedRequest, PreparedInputImage,
+        validate_size, xai_edit_json_body, ImagePayload, NormalizedRequest, PreparedInputImage,
+        ProviderFlavor,
     };
     use crate::types::GenerateImageRequest;
 
@@ -1356,16 +1603,22 @@ mod tests {
 
     #[test]
     fn omits_default_image_count_from_generation_payload() {
-        let normalized =
-            NormalizedRequest::from_request(generate_request_with_count(Some(1))).unwrap();
+        let normalized = NormalizedRequest::from_request(
+            generate_request_with_count(Some(1)),
+            ProviderFlavor::OpenAiCompatible,
+        )
+        .unwrap();
         assert!(normalized.api_params.get("n").is_none());
         assert!(normalized.history_params.get("n").is_none());
     }
 
     #[test]
     fn includes_requested_image_count_in_generation_payload() {
-        let normalized =
-            NormalizedRequest::from_request(generate_request_with_count(Some(4))).unwrap();
+        let normalized = NormalizedRequest::from_request(
+            generate_request_with_count(Some(4)),
+            ProviderFlavor::OpenAiCompatible,
+        )
+        .unwrap();
         assert_eq!(
             normalized
                 .api_params
@@ -1384,15 +1637,126 @@ mod tests {
 
     #[test]
     fn rejects_out_of_range_image_count() {
-        assert!(NormalizedRequest::from_request(generate_request_with_count(Some(0))).is_err());
-        assert!(NormalizedRequest::from_request(generate_request_with_count(Some(11))).is_err());
+        assert!(NormalizedRequest::from_request(
+            generate_request_with_count(Some(0)),
+            ProviderFlavor::OpenAiCompatible,
+        )
+        .is_err());
+        assert!(NormalizedRequest::from_request(
+            generate_request_with_count(Some(11)),
+            ProviderFlavor::OpenAiCompatible,
+        )
+        .is_err());
     }
 
     #[test]
     fn rejects_multiple_images_for_dall_e_3() {
         let mut request = generate_request_with_count(Some(2));
         request.model = "dall-e-3".to_string();
-        assert!(NormalizedRequest::from_request(request).is_err());
+        assert!(
+            NormalizedRequest::from_request(request, ProviderFlavor::OpenAiCompatible).is_err()
+        );
+    }
+
+    #[test]
+    fn maps_xai_grok_size_to_aspect_ratio_and_resolution() {
+        let mut request = generate_request_with_count(Some(4));
+        request.model = "grok-imagine-image-quality".to_string();
+        request.size = "16:9".to_string();
+        request.xai_resolution = Some("2k".to_string());
+        let normalized = NormalizedRequest::from_request(request, ProviderFlavor::XaiGrok).unwrap();
+        assert_eq!(
+            normalized
+                .api_params
+                .get("aspect_ratio")
+                .and_then(|value| value.as_str()),
+            Some("16:9")
+        );
+        assert_eq!(
+            normalized
+                .api_params
+                .get("resolution")
+                .and_then(|value| value.as_str()),
+            Some("2k")
+        );
+        assert_eq!(
+            normalized
+                .api_params
+                .get("response_format")
+                .and_then(|value| value.as_str()),
+            Some("b64_json")
+        );
+        assert!(normalized.api_params.get("size").is_none());
+        assert_eq!(
+            normalized
+                .api_params
+                .get("n")
+                .and_then(|value| value.as_i64()),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn builds_xai_edit_json_with_data_uri_image() {
+        let image = PreparedInputImage {
+            name: "input.png".to_string(),
+            mime_type: "image/png".to_string(),
+            bytes: b"png-bytes".to_vec(),
+        };
+        let body = xai_edit_json_body(
+            &serde_json::json!({
+                "model": "grok-imagine-image",
+                "prompt": "make it pencil sketch",
+                "response_format": "b64_json",
+                "aspect_ratio": "1:1"
+            }),
+            &[image],
+        )
+        .unwrap();
+        assert_eq!(
+            body.get("image")
+                .and_then(|value| value.get("type"))
+                .and_then(|value| value.as_str()),
+            Some("image_url")
+        );
+        assert!(body
+            .get("image")
+            .and_then(|value| value.get("url"))
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .starts_with("data:image/png;base64,"));
+        assert!(body.get("images").is_none());
+    }
+
+    #[test]
+    fn builds_xai_multi_image_edit_json() {
+        let images = vec![
+            PreparedInputImage {
+                name: "first.png".to_string(),
+                mime_type: "image/png".to_string(),
+                bytes: b"first".to_vec(),
+            },
+            PreparedInputImage {
+                name: "second.jpg".to_string(),
+                mime_type: "image/jpeg".to_string(),
+                bytes: b"second".to_vec(),
+            },
+        ];
+        let body = xai_edit_json_body(
+            &serde_json::json!({
+                "model": "grok-imagine-image",
+                "prompt": "combine references"
+            }),
+            &images,
+        )
+        .unwrap();
+        assert_eq!(
+            body.get("images")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(2)
+        );
+        assert!(body.get("image").is_none());
     }
 
     #[test]
@@ -1437,6 +1801,7 @@ mod tests {
             debug_mode: None,
             network_timeout_minutes: None,
             input_images: None,
+            xai_resolution: None,
         }
     }
 }

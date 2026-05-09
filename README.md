@@ -10,6 +10,7 @@ A Tauri desktop workbench for generating images with OpenAI-compatible image API
 - Reuse identical image-edit input files by content hash instead of copying the same source image for every request.
 - Enter a custom API key and base URL from the app UI.
 - Save multiple provider profiles with aliases and switch them from the top-right provider selector.
+- Use xAI Grok Imagine as a provider type with the default `https://api.x.ai/v1` base URL and `grok-imagine-image-quality` model.
 - Configure the image request network timeout in Settings, in minutes.
 - Save prompts, model, parameters, status, input-image references, and local output image paths in SQLite.
 - Inspect a generation detail view with preserved prompt formatting, request/response payloads, and source image previews for troubleshooting.
@@ -25,7 +26,7 @@ A Tauri desktop workbench for generating images with OpenAI-compatible image API
 - Frontend: React + TypeScript + Vite.
 - Desktop shell: Tauri v2.
 - Backend: Rust Tauri commands own API calls, local file writes, SQLite persistence, and image-path reads.
-- Image provider: `src-tauri/src/providers/openai.rs` implements the OpenAI-compatible Image API adapter.
+- Image provider: `src-tauri/src/providers/openai.rs` implements the OpenAI-compatible adapter and xAI Grok Imagine request mapping.
 - Persistence: `src-tauri/src/db.rs` stores provider profiles, generations, generation outputs, and input-image references in SQLite.
 - Local data: the SQLite database and image files are stored in the OS application data directory under `Image Gen Kit`.
 - Image storage: generated outputs are stored under `images/outputs`, while reusable edit inputs are stored under `images/inputs` by SHA-256 content hash.
@@ -62,7 +63,10 @@ The Windows installer is written to `src-tauri/target/release/bundle/nsis/Image 
 
 - `gpt-image-2` text-to-image generation and image edit requests are implemented. Mask-based local edits are not implemented yet.
 - Google/Nano Banana support is planned as a future provider adapter.
-- Provider type selection currently supports OpenAI-compatible providers; Google Nano Banana is listed as a TODO extension point.
+- Provider type selection currently supports OpenAI-compatible providers and xAI Grok Imagine. Google Nano Banana is listed as a TODO extension point.
+- xAI Grok Imagine uses provider-specific controls: `aspect_ratio`, `resolution` (`1k` or `2k`), and `response_format: "b64_json"`.
+- xAI single-image edit sends a JSON `image` data-URI reference and follows the input image aspect ratio.
+- xAI multi-image edit sends JSON `images` data-URI references, supports up to 3 input images, and can override `aspect_ratio`.
 - Image-edit input originals are saved for new history records only; older records created before this schema change cannot be backfilled automatically.
 - Reusable input images are intentionally not deleted when a single generation is deleted. Add reference-counting or garbage collection before cleaning `images/inputs`.
 - Existing pre-dedup input images are not migrated automatically into `images/inputs`.
