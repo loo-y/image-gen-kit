@@ -18,7 +18,8 @@ A Tauri desktop workbench for generating images with OpenAI-compatible image API
 - Keep the app running in the system tray; closing the window hides it, and the tray menu or in-app Quit button exits the app.
 - Keep saved API keys out of the database. On macOS, saved keys use Keychain.
 - Provider-oriented backend so additional providers, such as Google image models, can be added behind the same UI/history model.
-- Browse previous generations in a gallery-style History view, then reuse, reveal, or delete a generation.
+- Browse previous generations in a gallery-style History view, then reuse, retry, reveal, or delete a generation.
+- Retry a generation from History or the Generate inspector while preserving the saved request parameters and reference images.
 - Keep the Generate page sidebar fixed; its embedded History panel shows the latest 10 records and scrolls internally.
 
 ## Architecture
@@ -67,6 +68,7 @@ The Windows installer is written to `src-tauri/target/release/bundle/nsis/Image 
 - xAI Grok Imagine uses provider-specific controls: `aspect_ratio`, `resolution` (`1k` or `2k`), and `response_format: "b64_json"`.
 - xAI single-image edit sends a JSON `image` data-URI reference and follows the input image aspect ratio.
 - xAI multi-image edit sends JSON `images` data-URI references, supports up to 3 input images, and can override `aspect_ratio`.
+- Retry replays saved request JSON and input-image references. API keys are not stored in history, so retry requires the provider's saved key or the active provider key field.
 - Image-edit input originals are saved for new history records only; older records created before this schema change cannot be backfilled automatically.
 - Reusable input images are intentionally not deleted when a single generation is deleted. Add reference-counting or garbage collection before cleaning `images/inputs`.
 - Existing pre-dedup input images are not migrated automatically into `images/inputs`.

@@ -1,5 +1,136 @@
 # Image Gen Kit 交接记录
 
+## 2026-05-13 xAI Grok provider、参数切换与 History Retry
+
+### 1. 本次会话目标 / 当前阶段目标
+
+本阶段目标是把多供应商能力从 OpenAI-compatible 扩展到 xAI Grok Imagine，并补齐历史记录的“重试”能力。范围包括：xAI 文生图、单图编辑、多图编辑的请求格式；Generate 页按 provider type 切换参数；History/Inspector 的一键 Retry；Windows NSIS 包重新生成。当前方案是阶段性可用版本，已按 xAI 公开文档接入，不包含任何 moderation bypass 或 jailbreak 功能。
+
+### 2. 当前仓库状态
+
+- 当前分支：`main`。
+- 当前远端：`origin git@github.com:loo-y/image-gen-kit.git`。
+- 当前最新功能提交：`fe76017173d5fe35834df158d08eb747b54f6ed4`，已推送到 `origin/main`。
+- xAI provider 功能提交：`4c116af88cfae0cc9870551f7f184a65f7a9771b`，已推送到 `origin/main`。
+- 本次文档同步前工作区干净；本文档和 README 更新会作为单独文档提交。
+- 本阶段主要代码文件：`src/App.tsx`、`src/styles.css`、`src-tauri/src/commands.rs`、`src-tauri/src/providers/openai.rs`、`src-tauri/src/types.rs`、`README.md`。
+- 最新 Windows NSIS 安装包路径：`src-tauri/target/release/bundle/nsis/Image Gen Kit_0.1.0_x64-setup.exe`。
+- 最新 Windows NSIS 安装包 SHA256：`44935DD4692EB3DECDD8536F8B954B7EE2A5412F63C6ADCDA1BC6C4EB2C70116`。
+
+### 3. 今天实际遇到的问题
+
+1. xAI Grok 的图片 API 不是简单复用 OpenAI 参数。文生图和编辑都走 `/v1/images/*`，但 xAI 文生图使用 `aspect_ratio`、`resolution`、`response_format`，不是 OpenAI 的 `size`、`quality`、`output_format`、`moderation`。
+2. xAI 单图编辑和多图编辑都使用 `application/json` 图片引用；OpenAI edit 使用 multipart/form-data。把 xAI 当作普通 OpenAI-compatible edit 会请求失败。
+3. xAI 多图编辑最多 3 张参考图；OpenAI edit 当前 UI 支持最多 16 张。切换 provider 后仍显示 16 张会误导用户。
+4. 用户询问 Grok 是否有 content moderation 开关。官方文档没有公开 `moderation/spicy/safe_mode` 之类请求参数；第三方 jailbreak 文章不能作为产品功能依据。
+5. History 里没有一键重试。用户需要从历史记录直接用当时参数和参考图再次发起请求，而不是手动点 Use 再点 Generate。
+6. History 全页卡片已有图片点击 preview，再保留 `Preview` 按钮会造成重复操作；移除后正好变成 6 个按钮两排。
+
+### 4. 原因判断与结论
+
+- 本项目没有使用 OpenAI SDK，而是 Rust 后端用 `ureq` 直接 HTTP 调 provider API。因此 xAI 文档中 “OpenAI SDK 不支持 edit” 的限制不是项目限制；正确实现方式是给 xAI edit 单独构造 JSON body。
+- xAI generation、single-image edit、multi-image edit 都应该支持，但必须按 provider-specific 参数显示 UI。OpenAI-only 的 compression、moderation、output_format 不应在 xAI provider 下展示。
+- Retry 的权威来源应是历史记录里的 `paramsJson` 和 `generation_input_images`，不是当前表单状态。这样才能保留当时的 base URL、timeout、prompt、model、参数和参考图。
+- API key 不应写入 history；Retry 只能使用 provider 已保存 key，或者当前选中的同 provider 输入框 key。
+- 不实现绕过内容审核的开关。后续只接受 xAI 官方公开的请求参数。
+
+### 5. 这次已经落地的修复
+
+- `src-tauri/src/commands.rs`
+  - `provider_type = "xai-grok"` 时路由到 xAI Grok job 构造逻辑。
+
+- `src-tauri/src/providers/openai.rs`
+  - 新增 provider flavor 分支，xAI generation 发送 `aspect_ratio`、`resolution`、`response_format: "b64_json"`。
+  - xAI single-image edit 发送 JSON `image` data URI 引用。
+  - xAI multi-image edit 发送 JSON `images` data URI 引用，最多 3 张。
+  - Debug request 里对 data URI 图片内容脱敏，只记录字节数、mime type 和 name。
+  - 保留 OpenAI-compatible multipart edit 逻辑，不与 xAI JSON edit 混用。
+  - 增加单元测试覆盖 xAI generation 参数映射、单图 edit JSON、多图 edit JSON。
+
+- `src-tauri/src/types.rs`
+  - `GenerateImageRequest` 增加 `xai_resolution`，用于 xAI provider 的 `1k/2k` 参数。
+
+- `src/App.tsx`
+  - Provider type 下拉增加 `xAI Grok Imagine`。
+  - 切换到 xAI provider 时默认 base URL 为 `https://api.x.ai/v1`，默认模型为 `grok-imagine-image-quality`。
+  - Generate 参数面板按 provider 切换：OpenAI 显示 Size/Quality/Format/Compression/Moderation；xAI 显示 Aspect ratio/Resolution。
+  - xAI edit 上传上限显示并限制为 3 张。
+  - Generate 右侧 Inspector 增加 `Retry`。
+  - Generate 内嵌 History 卡片增加 `Retry`。
+  - History 全页卡片增加 `Retry`，并移除重复的 `Preview` 按钮；图片区域点击仍是 Preview。
+  - Retry 会解析 `paramsJson`，恢复当时 request body、base URL、timeout、输入图，并调用 `start_generation`。
+
+- `src/styles.css`
+  - 为 Generate 内嵌 History 卡片的 Retry 按钮补充样式，并调整卡片布局为状态点、文本、Retry 三列。
+
+- `README.md`
+  - 更新 xAI provider、xAI 参数模型、Retry 能力和 Retry API key 边界说明。
+
+### 6. 已验证结果
+
+本阶段实际验证通过：
+
+- `cmd /c npm run build`：TypeScript 和 Vite production build 通过。
+- `cargo fmt --check`：Rust 格式检查通过。
+- `cargo check`：Rust 类型检查通过。
+- `cargo test`：14 个 Rust 单元测试通过。
+- `cmd /c npm run tauri -- build --ci --no-sign`：Windows release binary 和 NSIS 安装包生成成功。
+- 最新 installer SHA256：`44935DD4692EB3DECDD8536F8B954B7EE2A5412F63C6ADCDA1BC6C4EB2C70116`。
+
+未验证：
+
+- 未使用真实 xAI API key 做文生图、单图 edit、多图 edit 端到端调用。
+- 未用真实 OpenAI API key 验证 Retry 对 OpenAI edit 输入图的重放。
+- 未安装最新 NSIS 包做人工 UI 回归。
+- 未验证 provider profile 被删除后历史 Retry 的失败提示。
+
+### 7. 踩过的坑 / 已否定方案 / 关键约束
+
+- 不要把 xAI edit 走 OpenAI multipart；xAI 文档要求 JSON `image` / `images`。
+- 不要把 xAI 当成完全 OpenAI-compatible provider；它的 UI 参数必须单独展示。
+- 不要实现或产品化 jailbreak / moderation bypass。只接入官方公开参数。
+- 不要把 API key 放进 history；Retry 只能依赖 saved key 或当前 active provider 输入框 key。
+- 不要让 Retry 只做表单回填；这会丢失当时 request body、timeout 和参考图，必须从 `paramsJson` 与 `generation_input_images` 重放。
+
+### 8. 接手后如何继续
+
+1. 先读 `README.md` 的 Features 和 Current Limits，确认当前 OpenAI/xAI 能力边界。
+2. 看 `src-tauri/src/providers/openai.rs` 中 `ProviderFlavor::XaiGrok`、`call_xai_grok_edit()`、`xai_edit_json_body()`，确认 xAI JSON edit 构造。
+3. 看 `src/App.tsx` 的 `retryGeneration()`、`parseGenerationRequestRecord()`、`retrySizeFromBody()`，确认 Retry 如何重放历史请求。
+4. 看 `src/App.tsx` 的 Generate 参数区域，确认 provider type 如何切换 OpenAI/xAI 控件。
+5. 本地先跑 `cmd /c npm run build`、`cargo test`、`cargo check`。
+6. 如果要发包，跑 `cmd /c npm run tauri -- build --ci --no-sign` 并记录 installer SHA256。
+7. 手工验证优先顺序：xAI 文生图、xAI 单图 edit、xAI 多图 edit、OpenAI edit Retry、History 全页 Retry、Generate Inspector Retry。
+
+### 9. 当前仍存在的问题 / 边界
+
+- xAI/OpenAI 真实 API 端到端未验证。
+- Retry 不保存 API key，如果 provider 没有 saved key 且当前输入框没有同 provider key，会失败。
+- Retry 依赖历史记录已有 `paramsJson` 和 `generation_input_images`；更早旧记录如果缺输入图路径，无法完整重试图生图。
+- Preview modal 仍未做多输出图切换；当前多输出主要在 Detail 中展示。
+- Windows 安装包仍未签名。
+
+### 10. 最终想实现的产品目标
+
+最终目标是一个可安装的多供应商图片生成/编辑工作台：不同 provider 暴露自己的参数模型，历史记录可完整追溯和重试，输入图和输出图可复用/排障，Windows 安装包可分发。当前版本已经把 xAI Grok、OpenAI-compatible、History Retry 和 Windows NSIS 打包串起来，但还需要真实 API 回归和安装包签名。
+
+### 11. 后续 TODO
+
+1. 用真实 xAI API key 验证三条链路。
+   - 目的：确认 xAI 文生图、单图 edit、多图 edit 的 request/response、图片落盘和 History Detail 都可用。
+
+2. 用真实 OpenAI API key 验证 Retry。
+   - 目的：确认历史参数和参考图重放不会偏离原请求。
+
+3. 给 Retry 失败增加更明确的提示。
+   - 目的：区分 provider key 缺失、原 provider profile 被删除、输入图文件丢失、API 拒绝等不同原因。
+
+4. 给 Preview modal 增加多输出切换。
+   - 目的：一次请求有多张 output 时，可以在 Preview 中切换，而不是只能到 Detail 查看。
+
+5. 为 Windows 安装包做签名。
+   - 目的：降低公开分发时的 SmartScreen/安全提示。
+
 ## 2026-05-07 输入图去重、多输出预览与 Generate 布局修复
 
 ### 1. 本次会话目标 / 当前阶段目标
