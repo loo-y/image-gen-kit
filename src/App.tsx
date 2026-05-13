@@ -586,8 +586,13 @@ export default function App() {
     setSelected(detail);
     setPrompt(detail.generation.prompt);
     setModel(detail.generation.model);
-    setSize(knownSize(detail.generation.size) ? detail.generation.size : "custom");
-    if (!knownSize(detail.generation.size) && detail.generation.size.includes("x")) {
+    if (detail.generation.providerType === "xai-grok") {
+      setXaiAspectRatio(knownXaiAspectRatio(detail.generation.size) ? detail.generation.size : "auto");
+      setXaiResolution(detail.generation.quality === "2k" ? "2k" : "1k");
+    } else {
+      setSize(knownSize(detail.generation.size) ? detail.generation.size : "custom");
+    }
+    if (detail.generation.providerType !== "xai-grok" && !knownSize(detail.generation.size) && detail.generation.size.includes("x")) {
       const [width, height] = detail.generation.size.split("x").map(Number);
       if (Number.isFinite(width)) setCustomWidth(width);
       if (Number.isFinite(height)) setCustomHeight(height);
@@ -706,6 +711,51 @@ export default function App() {
     setActiveView("generate");
   }
 
+  async function retryGeneration(detail: GenerationDetail) {
+    setIsGenerating(true);
+    setError("");
+    setNotice("");
+    try {
+      const parsedRequest = parseGenerationRequestRecord(detail);
+      const body = parsedRequest.body;
+      const inputImages = detail.inputImages.length > 0
+        ? (await loadHistoryInputImages(detail)).map((image) => ({
+            name: image.name,
+            mimeType: image.mimeType,
+            dataUrl: image.dataUrl,
+          }))
+        : [];
+      const started = await invoke<StartedGeneration>("start_generation", {
+        request: {
+          providerId: detail.generation.providerId,
+          apiKeyOverride: activeProfileId === detail.generation.providerId ? apiKey : null,
+          baseUrl: baseUrlFromImageRequestUrl(parsedRequest.url),
+          model: stringParam(body.model, detail.generation.model),
+          prompt: stringParam(body.prompt, detail.generation.prompt),
+          size: retrySizeFromBody(detail, body),
+          quality: retryQualityFromBody(detail, body),
+          xaiResolution: detail.generation.providerType === "xai-grok" ? retryQualityFromBody(detail, body) : null,
+          n: numericParam(body.n, imageCountFromGeneration(detail)),
+          outputFormat: stringParam(body.output_format, detail.generation.outputFormat),
+          outputCompression: numericParam(body.output_compression, null),
+          moderation: optionalStringParam(body.moderation),
+          debugMode,
+          networkTimeoutMinutes: numericParam(parsedRequest.timeoutMinutes, null),
+          inputImages,
+        },
+      });
+      setHistory((current) => upsertGeneration(current, started.generation));
+      setSelected(started.generation);
+      setNotice(`Retry started from ${formatTime(detail.generation.createdAt)}`);
+      void pollGeneration(started.generationId);
+    } catch (err) {
+      setError(errorMessage(err));
+      await refreshHistory().catch(() => undefined);
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
   async function onHistorySearch(value: string) {
     setHistoryQuery(value);
     try {
@@ -808,6 +858,7 @@ export default function App() {
             onPreview={previewGeneration}
             onOpen={openGeneration}
             onUse={useGeneration}
+            onRetry={retryGeneration}
             onDetail={setDetailGeneration}
             onReveal={revealGeneration}
             onOpenFolder={openImagesDirectory}
@@ -1036,6 +1087,7 @@ export default function App() {
               onQuery={onHistorySearch}
               selectedId={selected?.generation.id}
               onSelect={selectGeneration}
+              onRetry={retryGeneration}
             />
 
             <Inspector
@@ -1043,6 +1095,7 @@ export default function App() {
               imageDataUrl={imageDataUrl}
               onOpen={() => selected && openGeneration(selected)}
               onReveal={revealSelected}
+              onRetry={() => selected && retryGeneration(selected)}
               onDelete={deleteSelected}
             />
           </div>
@@ -1062,6 +1115,7 @@ export default function App() {
             onClose={() => setDetailGeneration(null)}
             onOpen={() => openGeneration(detailGeneration)}
             onReveal={() => revealGeneration(detailGeneration)}
+            onRetry={() => retryGeneration(detailGeneration)}
           />
         )}
         {deleteCandidateId && (
@@ -1115,6 +1169,7 @@ function GalleryHistoryView(props: {
   onPreview: (detail: GenerationDetail) => void;
   onOpen: (detail: GenerationDetail) => void;
   onUse: (detail: GenerationDetail) => void;
+  onRetry: (detail: GenerationDetail) => void;
   onDetail: (detail: GenerationDetail) => void;
   onReveal: (detail: GenerationDetail) => void;
   onOpenFolder: () => void;
@@ -1165,9 +1220,6 @@ function GalleryHistoryView(props: {
                   <span>{formatTime(detail.generation.createdAt)}</span>
                 </div>
                 <div className="galleryActions">
-                  <button className="smallButton" onClick={() => props.onPreview(detail)} disabled={!output}>
-                    Preview
-                  </button>
                   <button className="smallButton" onClick={() => props.onOpen(detail)} disabled={!output}>
                     Open
                   </button>
@@ -1176,6 +1228,9 @@ function GalleryHistoryView(props: {
                   </button>
                   <button className="smallButton" onClick={() => props.onUse(detail)}>
                     Use
+                  </button>
+                  <button className="smallButton" onClick={() => props.onRetry(detail)}>
+                    Retry
                   </button>
                   <button className="smallButton" onClick={() => props.onReveal(detail)} disabled={!output}>
                     Reveal
@@ -1284,6 +1339,7 @@ function HistoryView(props: {
   onQuery: (value: string) => void;
   selectedId?: string;
   onSelect: (detail: GenerationDetail) => void;
+  onRetry: (detail: GenerationDetail) => void;
 }) {
   const visibleHistory = props.history.slice(0, 10);
 
@@ -1299,17 +1355,35 @@ function HistoryView(props: {
       </div>
       <div className="historyList">
         {visibleHistory.map((detail) => (
-          <button
+          <article
             key={detail.generation.id}
             className={props.selectedId === detail.generation.id ? "historyItem selected" : "historyItem"}
             onClick={() => props.onSelect(detail)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                props.onSelect(detail);
+              }
+            }}
           >
             <span className={`statusDot ${detail.generation.status}`} />
             <span className="historyText">
               <strong>{detail.generation.prompt || "Untitled prompt"}</strong>
               <small>{detail.generation.model} · {displayStatus(detail.generation.status)} · {formatTime(detail.generation.createdAt)}</small>
             </span>
-          </button>
+            <button
+              className="historyRetryButton"
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                props.onRetry(detail);
+              }}
+            >
+              Retry
+            </button>
+          </article>
         ))}
         {props.history.length === 0 && <div className="emptyState">No generations</div>}
       </div>
@@ -1486,6 +1560,7 @@ function GenerationDetailModal(props: {
   onClose: () => void;
   onOpen: () => void;
   onReveal: () => void;
+  onRetry: () => void;
 }) {
   const output = props.detail.outputs[0];
   return (
@@ -1502,6 +1577,9 @@ function GenerationDetailModal(props: {
             </button>
             <button className="secondaryButton" onClick={props.onReveal} disabled={!output}>
               Reveal
+            </button>
+            <button className="secondaryButton" onClick={props.onRetry}>
+              Retry
             </button>
             <button className="secondaryButton" onClick={props.onClose}>
               Close
@@ -1570,6 +1648,7 @@ function Inspector(props: {
   imageDataUrl: string;
   onOpen: () => void;
   onReveal: () => void;
+  onRetry: () => void;
   onDelete: () => void;
 }) {
   const output = props.detail?.outputs[0];
@@ -1613,6 +1692,9 @@ function Inspector(props: {
         </button>
         <button className="secondaryButton" onClick={props.onReveal} disabled={!output}>
           Reveal
+        </button>
+        <button className="secondaryButton" onClick={props.onRetry} disabled={!props.detail}>
+          Retry
         </button>
         <button className="dangerButton" onClick={props.onDelete} disabled={!props.detail}>
           Delete
@@ -1724,6 +1806,61 @@ function errorMessage(err: unknown) {
 
 function knownSize(value: string) {
   return sizes.includes(value);
+}
+
+function knownXaiAspectRatio(value: string) {
+  return xaiAspectRatioOptions.some((option) => option.value === value);
+}
+
+function parseGenerationRequestRecord(detail: GenerationDetail): { url?: string; timeoutMinutes?: number; body: Record<string, unknown> } {
+  try {
+    const value = JSON.parse(detail.generation.paramsJson);
+    const body = value?.body && typeof value.body === "object" ? value.body : {};
+    return {
+      url: typeof value?.url === "string" ? value.url : undefined,
+      timeoutMinutes: typeof value?.timeout_minutes === "number" ? value.timeout_minutes : undefined,
+      body,
+    };
+  } catch {
+    return { body: {} };
+  }
+}
+
+function baseUrlFromImageRequestUrl(value?: string) {
+  if (!value) return null;
+  const trimmed = value.trim();
+  for (const suffix of ["/images/generations", "/images/edits"]) {
+    if (trimmed.endsWith(suffix)) {
+      return trimmed.slice(0, -suffix.length);
+    }
+  }
+  return null;
+}
+
+function retrySizeFromBody(detail: GenerationDetail, body: Record<string, unknown>) {
+  if (detail.generation.providerType === "xai-grok") {
+    return stringParam(body.aspect_ratio, detail.generation.size || "auto");
+  }
+  return stringParam(body.size, detail.generation.size || "auto");
+}
+
+function retryQualityFromBody(detail: GenerationDetail, body: Record<string, unknown>) {
+  if (detail.generation.providerType === "xai-grok") {
+    return stringParam(body.resolution, detail.generation.quality || "1k");
+  }
+  return stringParam(body.quality, detail.generation.quality || "auto");
+}
+
+function stringParam(value: unknown, fallback: string) {
+  return typeof value === "string" && value.trim() ? value : fallback;
+}
+
+function optionalStringParam(value: unknown) {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function numericParam(value: unknown, fallback: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 function imageCountFromGeneration(detail: GenerationDetail) {
