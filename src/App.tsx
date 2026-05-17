@@ -113,6 +113,7 @@ const sizes = [...sizeOptions.map((option) => option.value), "custom"];
 const qualities = ["auto", "low", "medium", "high"];
 const xaiResolutions = ["1k", "2k"];
 const formats = ["png", "jpeg", "webp"];
+const openAiResponseFormats = ["url", "b64_json"];
 const moderationModes = ["auto", "low"];
 const defaultImageCount = 1;
 const providerTypeOptions = [
@@ -146,6 +147,7 @@ export default function App() {
   const [quality, setQuality] = useState("auto");
   const [imageCount, setImageCount] = useState(defaultImageCount);
   const [outputFormat, setOutputFormat] = useState("png");
+  const [openAiResponseFormat, setOpenAiResponseFormat] = useState("url");
   const [outputCompression, setOutputCompression] = useState(90);
   const [moderation, setModeration] = useState("auto");
   const [generationMode, setGenerationMode] = useState<"generate" | "edit">("generate");
@@ -405,6 +407,7 @@ export default function App() {
           xaiResolution: isXaiProvider ? xaiResolution : null,
           n: imageCount,
           outputFormat,
+          responseFormat: isXaiProvider ? null : openAiResponseFormat,
           outputCompression: !isXaiProvider && compressionEnabled ? outputCompression : null,
           moderation: isXaiProvider ? null : moderation,
           debugMode,
@@ -583,6 +586,7 @@ export default function App() {
   }
 
   async function selectGeneration(detail: GenerationDetail) {
+    const parsedRequest = parseGenerationRequestRecord(detail);
     setSelected(detail);
     setPrompt(detail.generation.prompt);
     setModel(detail.generation.model);
@@ -600,6 +604,9 @@ export default function App() {
     setQuality(detail.generation.quality);
     setImageCount(imageCountFromGeneration(detail));
     setOutputFormat(detail.generation.outputFormat);
+    if (detail.generation.providerType !== "xai-grok") {
+      setOpenAiResponseFormat(responseFormatFromBody(parsedRequest.body));
+    }
     await loadPreview(detail);
   }
 
@@ -737,6 +744,7 @@ export default function App() {
           xaiResolution: detail.generation.providerType === "xai-grok" ? retryQualityFromBody(detail, body) : null,
           n: numericParam(body.n, imageCountFromGeneration(detail)),
           outputFormat: stringParam(body.output_format, detail.generation.outputFormat),
+          responseFormat: detail.generation.providerType === "xai-grok" ? null : responseFormatFromBody(body),
           outputCompression: numericParam(body.output_compression, null),
           moderation: optionalStringParam(body.moderation),
           debugMode,
@@ -1035,6 +1043,15 @@ export default function App() {
                         ))}
                       </select>
                     </Field>
+                    <Field label="Response format">
+                      <select value={openAiResponseFormat} onChange={(event) => setOpenAiResponseFormat(event.target.value)}>
+                        {openAiResponseFormats.map((item) => (
+                          <option key={item} value={item}>
+                            {item}
+                          </option>
+                        ))}
+                      </select>
+                    </Field>
                     <Field label="Compression">
                       <input
                         type="range"
@@ -1077,7 +1094,7 @@ export default function App() {
                 <button className="primaryButton" onClick={generateImage} disabled={isGenerating}>
                   {isGenerating ? "Working" : generationMode === "edit" ? "Edit image" : "Generate image"}
                 </button>
-                <span>{generationMode} · {selectedSize} · {selectedQuality} · {imageCount} image{imageCount === 1 ? "" : "s"}{isXaiProvider ? "" : ` · ${outputFormat}`}</span>
+                <span>{generationMode} · {selectedSize} · {selectedQuality} · {imageCount} image{imageCount === 1 ? "" : "s"}{isXaiProvider ? "" : ` · ${outputFormat} · ${openAiResponseFormat}`}</span>
               </div>
             </section>
 
@@ -1857,6 +1874,10 @@ function stringParam(value: unknown, fallback: string) {
 
 function optionalStringParam(value: unknown) {
   return typeof value === "string" && value.trim() ? value : null;
+}
+
+function responseFormatFromBody(body: Record<string, unknown>) {
+  return body.response_format === "b64_json" ? "b64_json" : "url";
 }
 
 function numericParam(value: unknown, fallback: number | null) {

@@ -12,6 +12,7 @@ A Tauri desktop workbench for generating images with OpenAI-compatible image API
 - Save multiple provider profiles with aliases and switch them from the top-right provider selector.
 - Use xAI Grok Imagine as a provider type with the default `https://api.x.ai/v1` base URL and `grok-imagine-image-quality` model.
 - Configure the image request network timeout in Settings, in minutes.
+- Switch OpenAI-compatible image responses between `url` and `b64_json` when comparing provider behavior.
 - Save prompts, model, parameters, status, input-image references, and local output image paths in SQLite.
 - Inspect a generation detail view with preserved prompt formatting, request/response payloads, and source image previews for troubleshooting.
 - Receive desktop notifications when background image jobs succeed or fail.

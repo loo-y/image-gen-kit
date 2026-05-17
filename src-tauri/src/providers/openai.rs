@@ -717,6 +717,12 @@ impl NormalizedRequest {
         let image_count = validate_image_count(request.n)?;
         validate_model_image_count(&model, image_count)?;
         let output_format = validate_output_format(&request.output_format)?;
+        let response_format = match provider_flavor {
+            ProviderFlavor::OpenAiCompatible => {
+                validate_openai_response_format(request.response_format.as_deref())?
+            }
+            ProviderFlavor::XaiGrok => "b64_json".to_string(),
+        };
         let moderation = validate_moderation(request.moderation.as_deref())?;
         let compression = validate_compression(request.output_compression, &output_format)?;
         let input_images = prepare_input_images(request.input_images.unwrap_or_default())?;
@@ -742,13 +748,14 @@ impl NormalizedRequest {
                 "size": size.clone(),
                 "quality": quality.clone(),
                 "output_format": output_format.clone(),
+                "response_format": response_format.clone(),
                 "moderation": moderation.clone()
             }),
             ProviderFlavor::XaiGrok => {
                 let mut params = json!({
                     "model": model.clone(),
                     "prompt": prompt.clone(),
-                    "response_format": "b64_json"
+                    "response_format": response_format.clone()
                 });
                 apply_xai_size_options(&mut params, &size, &quality, endpoint, input_images.len())?;
                 params
@@ -1385,6 +1392,14 @@ fn validate_moderation(value: Option<&str>) -> Result<String, String> {
     }
 }
 
+fn validate_openai_response_format(value: Option<&str>) -> Result<String, String> {
+    let value = value.unwrap_or("url").trim().to_lowercase();
+    match value.as_str() {
+        "url" | "b64_json" => Ok(value),
+        _ => Err("Response format must be url or b64_json".to_string()),
+    }
+}
+
 fn validate_compression(value: Option<i64>, output_format: &str) -> Result<Option<i64>, String> {
     let Some(value) = value else {
         return Ok(None);
@@ -1636,6 +1651,44 @@ mod tests {
     }
 
     #[test]
+    fn defaults_openai_response_format_to_url() {
+        let normalized = NormalizedRequest::from_request(
+            generate_request_with_count(Some(1)),
+            ProviderFlavor::OpenAiCompatible,
+        )
+        .unwrap();
+        assert_eq!(
+            normalized
+                .api_params
+                .get("response_format")
+                .and_then(|value| value.as_str()),
+            Some("url")
+        );
+    }
+
+    #[test]
+    fn accepts_openai_base64_response_format() {
+        let mut request = generate_request_with_count(Some(2));
+        request.response_format = Some("b64_json".to_string());
+        let normalized =
+            NormalizedRequest::from_request(request, ProviderFlavor::OpenAiCompatible).unwrap();
+        assert_eq!(
+            normalized
+                .api_params
+                .get("response_format")
+                .and_then(|value| value.as_str()),
+            Some("b64_json")
+        );
+        assert_eq!(
+            normalized
+                .history_params
+                .get("response_format")
+                .and_then(|value| value.as_str()),
+            Some("b64_json")
+        );
+    }
+
+    #[test]
     fn rejects_out_of_range_image_count() {
         assert!(NormalizedRequest::from_request(
             generate_request_with_count(Some(0)),
@@ -1796,6 +1849,7 @@ mod tests {
             quality: "auto".to_string(),
             n,
             output_format: "png".to_string(),
+            response_format: None,
             output_compression: None,
             moderation: Some("auto".to_string()),
             debug_mode: None,

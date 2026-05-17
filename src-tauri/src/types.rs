@@ -119,6 +119,7 @@ pub struct GenerateImageRequest {
     pub xai_resolution: Option<String>,
     pub n: Option<i64>,
     pub output_format: String,
+    pub response_format: Option<String>,
     pub output_compression: Option<i64>,
     pub moderation: Option<String>,
     pub debug_mode: Option<bool>,
