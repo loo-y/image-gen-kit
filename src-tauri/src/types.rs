@@ -106,6 +106,13 @@ pub struct ListGenerationsRequest {
     pub offset: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationPage {
+    pub items: Vec<GenerationDetail>,
+    pub total: i64,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateImageRequest {

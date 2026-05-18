@@ -68,6 +68,11 @@ type AppBootstrap = {
   generations: GenerationDetail[];
 };
 
+type GenerationPage = {
+  items: GenerationDetail[];
+  total: number;
+};
+
 type StartedGeneration = {
   generationId: string;
   generation: GenerationDetail;
@@ -123,6 +128,7 @@ const providerTypeOptions = [
 ];
 const generationPollIntervalMs = 2500;
 const generationPollAttempts = 400;
+const historyGalleryPageSize = 24;
 const maxEditImages = 16;
 const maxEditImageBytes = 50 * 1024 * 1024;
 const supportedEditMimeTypes = ["image/png", "image/jpeg", "image/webp"];
@@ -155,7 +161,13 @@ export default function App() {
   const [isImageDropActive, setIsImageDropActive] = useState(false);
   const [debugMode, setDebugMode] = useState(true);
   const [history, setHistory] = useState<GenerationDetail[]>([]);
+  const [galleryHistory, setGalleryHistory] = useState<GenerationDetail[]>([]);
   const [historyQuery, setHistoryQuery] = useState("");
+  const [historyPage, setHistoryPage] = useState(0);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const [historyPageInput, setHistoryPageInput] = useState("1");
+  const [hasNextHistoryPage, setHasNextHistoryPage] = useState(false);
+  const [isLoadingHistoryPage, setIsLoadingHistoryPage] = useState(false);
   const [thumbnailUrls, setThumbnailUrls] = useState<Record<string, string>>({});
   const [selected, setSelected] = useState<GenerationDetail | null>(null);
   const [imageDataUrl, setImageDataUrl] = useState("");
@@ -184,6 +196,9 @@ export default function App() {
   const selectedIdRef = useRef<string | null>(null);
   const activeViewRef = useRef(activeView);
   const editImagesRef = useRef(editImages);
+  const imageDataUrlCacheRef = useRef<Map<string, string>>(new Map());
+  const loadingThumbnailIdsRef = useRef<Set<string>>(new Set());
+  const historySearchTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     void bootstrap();
@@ -202,6 +217,14 @@ export default function App() {
   }, [editImages]);
 
   useEffect(() => {
+    return () => {
+      if (historySearchTimerRef.current) {
+        window.clearTimeout(historySearchTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     if (!activeProfile) return;
     setProviderAlias(activeProfile.name);
     setProviderType(activeProfile.providerType);
@@ -210,42 +233,6 @@ export default function App() {
     setNetworkTimeoutMinutes(activeProfile.networkTimeoutMinutes || 15);
     setSaveApiKey(activeProfile.apiKeySaved);
   }, [activeProfile]);
-
-  useEffect(() => {
-    if (activeView !== "history") return;
-    let cancelled = false;
-    const missing = history
-      .filter((detail) => detail.outputs[0] && !thumbnailUrls[detail.generation.id])
-      .slice(0, 80);
-
-    if (missing.length === 0) return;
-
-    void Promise.all(
-      missing.map(async (detail) => {
-        try {
-          const dataUrl = await invoke<string>("read_image_data_url", {
-            path: detail.outputs[0].path,
-          });
-          return [detail.generation.id, dataUrl] as const;
-        } catch {
-          return null;
-        }
-      }),
-    ).then((entries) => {
-      if (cancelled) return;
-      setThumbnailUrls((current) => {
-        const next = { ...current };
-        for (const entry of entries) {
-          if (entry) next[entry[0]] = entry[1];
-        }
-        return next;
-      });
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeView, history, thumbnailUrls]);
 
   useEffect(() => {
     const hasRunning = history.some((detail) => detail.generation.status === "running");
@@ -311,6 +298,10 @@ export default function App() {
       const boot = await invoke<AppBootstrap>("init_app");
       setProfiles(boot.profiles);
       setHistory(sortGenerations(boot.generations));
+      setGalleryHistory(sortGenerations(boot.generations.slice(0, historyGalleryPageSize)));
+      setHistoryTotal(boot.generations.length);
+      setHistoryPageInput("1");
+      setHasNextHistoryPage(boot.generations.length > historyGalleryPageSize);
       if (boot.profiles[0]) {
         setActiveProfileId(boot.profiles[0].id);
       }
@@ -323,12 +314,32 @@ export default function App() {
   }
 
   async function refreshHistory(query = historyQuery) {
-    const generations = await invoke<GenerationDetail[]>("list_generations", {
-      request: { query, limit: 80, offset: 0 },
+    const page = await invoke<GenerationPage>("list_generations", {
+      request: { query, limit: 40, offset: 0 },
     });
-    const sorted = sortGenerations(generations);
+    const sorted = sortGenerations(page.items);
     setHistory(sorted);
     return sorted;
+  }
+
+  async function refreshGalleryHistory(query = historyQuery, page = historyPage) {
+    setIsLoadingHistoryPage(true);
+    try {
+      const response = await invoke<GenerationPage>("list_generations", {
+        request: { query, limit: historyGalleryPageSize, offset: page * historyGalleryPageSize },
+      });
+      const maxPage = Math.max(0, Math.ceil(response.total / historyGalleryPageSize) - 1);
+      const normalizedPage = Math.min(page, maxPage);
+      const pageItems = sortGenerations(response.items);
+      setGalleryHistory(pageItems);
+      setHistoryPage(normalizedPage);
+      setHistoryPageInput(String(normalizedPage + 1));
+      setHistoryTotal(response.total);
+      setHasNextHistoryPage(normalizedPage < maxPage);
+      return pageItems;
+    } finally {
+      setIsLoadingHistoryPage(false);
+    }
   }
 
   async function saveProfile() {
@@ -616,7 +627,7 @@ export default function App() {
       setImageDataUrl("");
       return;
     }
-    const dataUrl = await invoke<string>("read_image_data_url", { path: first.path });
+    const dataUrl = await readCachedImageDataUrl(first.path);
     setImageDataUrl(dataUrl);
   }
 
@@ -694,7 +705,7 @@ export default function App() {
     await selectGeneration(detail);
     const first = detail.outputs[0];
     if (!first) return;
-    const dataUrl = await invoke<string>("read_image_data_url", { path: first.path });
+    const dataUrl = await readCachedImageDataUrl(first.path);
     setPreviewImage({ detail, dataUrl });
   }
 
@@ -766,10 +777,47 @@ export default function App() {
 
   async function onHistorySearch(value: string) {
     setHistoryQuery(value);
+    if (historySearchTimerRef.current) {
+      window.clearTimeout(historySearchTimerRef.current);
+    }
+    historySearchTimerRef.current = window.setTimeout(() => {
+      void Promise.all([
+        refreshHistory(value),
+        refreshGalleryHistory(value, 0),
+      ]).catch((err) => setError(errorMessage(err)));
+    }, 180);
+  }
+
+  useEffect(() => {
+    if (activeView !== "history") return;
+    void refreshGalleryHistory(historyQuery, historyPage).catch((err) => setError(errorMessage(err)));
+  }, [activeView]);
+
+  async function readCachedImageDataUrl(path: string) {
+    const cached = imageDataUrlCacheRef.current.get(path);
+    if (cached) return cached;
+    const dataUrl = await invoke<string>("read_image_data_url", { path });
+    imageDataUrlCacheRef.current.set(path, dataUrl);
+    return dataUrl;
+  }
+
+  async function loadHistoryThumbnail(detail: GenerationDetail) {
+    const output = detail.outputs[0];
+    const generationId = detail.generation.id;
+    if (!output || thumbnailUrls[generationId] || loadingThumbnailIdsRef.current.has(generationId)) {
+      return;
+    }
+    loadingThumbnailIdsRef.current.add(generationId);
     try {
-      await refreshHistory(value);
-    } catch (err) {
-      setError(errorMessage(err));
+      const dataUrl = await readCachedImageDataUrl(output.path);
+      setThumbnailUrls((current) => ({
+        ...current,
+        [generationId]: dataUrl,
+      }));
+    } catch {
+      // Keep the status placeholder if a thumbnail cannot be loaded.
+    } finally {
+      loadingThumbnailIdsRef.current.delete(generationId);
     }
   }
 
@@ -857,13 +905,21 @@ export default function App() {
           />
         ) : activeView === "history" ? (
           <GalleryHistoryView
-            history={history}
+            history={galleryHistory}
             query={historyQuery}
+            page={historyPage}
+            pageInput={historyPageInput}
+            total={historyTotal}
+            totalPages={Math.max(1, Math.ceil(historyTotal / historyGalleryPageSize))}
+            hasPreviousPage={historyPage > 0}
+            hasNextPage={hasNextHistoryPage}
+            isLoadingPage={isLoadingHistoryPage}
             thumbnailUrls={thumbnailUrls}
             selectedId={selected?.generation.id}
             onQuery={onHistorySearch}
             onSelect={selectGeneration}
             onPreview={previewGeneration}
+            onThumbnailVisible={loadHistoryThumbnail}
             onOpen={openGeneration}
             onUse={useGeneration}
             onRetry={retryGeneration}
@@ -871,6 +927,14 @@ export default function App() {
             onReveal={revealGeneration}
             onOpenFolder={openImagesDirectory}
             onDelete={deleteGeneration}
+            onPreviousPage={() => void refreshGalleryHistory(historyQuery, Math.max(0, historyPage - 1))}
+            onNextPage={() => void refreshGalleryHistory(historyQuery, historyPage + 1)}
+            onPageInput={setHistoryPageInput}
+            onJumpToPage={() => {
+              const requestedPage = Math.max(1, Math.round(Number(historyPageInput) || 1));
+              const totalPages = Math.max(1, Math.ceil(historyTotal / historyGalleryPageSize));
+              void refreshGalleryHistory(historyQuery, Math.min(totalPages, requestedPage) - 1);
+            }}
           />
         ) : (
           <div className="contentGrid">
@@ -1111,7 +1175,7 @@ export default function App() {
               detail={selected}
               imageDataUrl={imageDataUrl}
               onOpen={() => selected && openGeneration(selected)}
-              onReveal={revealSelected}
+              onUse={() => selected && useGeneration(selected)}
               onRetry={() => selected && retryGeneration(selected)}
               onDelete={deleteSelected}
             />
@@ -1179,11 +1243,19 @@ function DeleteConfirmModal(props: {
 function GalleryHistoryView(props: {
   history: GenerationDetail[];
   query: string;
+  page: number;
+  pageInput: string;
+  total: number;
+  totalPages: number;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
+  isLoadingPage: boolean;
   thumbnailUrls: Record<string, string>;
   selectedId?: string;
   onQuery: (value: string) => void;
   onSelect: (detail: GenerationDetail) => void;
   onPreview: (detail: GenerationDetail) => void;
+  onThumbnailVisible: (detail: GenerationDetail) => void;
   onOpen: (detail: GenerationDetail) => void;
   onUse: (detail: GenerationDetail) => void;
   onRetry: (detail: GenerationDetail) => void;
@@ -1191,13 +1263,17 @@ function GalleryHistoryView(props: {
   onReveal: (detail: GenerationDetail) => void;
   onOpenFolder: () => void;
   onDelete: (id: string) => void;
+  onPreviousPage: () => void;
+  onNextPage: () => void;
+  onPageInput: (value: string) => void;
+  onJumpToPage: () => void;
 }) {
   return (
     <section className="historyGallery">
       <div className="galleryToolbar">
         <div>
           <h2>History</h2>
-          <p>{props.history.length} generations</p>
+          <p>{props.total} generations</p>
         </div>
         <input
           value={props.query}
@@ -1209,6 +1285,34 @@ function GalleryHistoryView(props: {
         </button>
       </div>
 
+      <div className="galleryPagination">
+        <span>Page {props.page + 1} of {props.totalPages}</span>
+        <div>
+          <button className="secondaryButton" onClick={props.onPreviousPage} disabled={!props.hasPreviousPage || props.isLoadingPage}>
+            Previous
+          </button>
+          <label className="pageJump">
+            <span>Go to</span>
+            <input
+              type="number"
+              min={1}
+              max={props.totalPages}
+              value={props.pageInput}
+              onChange={(event) => props.onPageInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") props.onJumpToPage();
+              }}
+            />
+          </label>
+          <button className="secondaryButton" onClick={props.onJumpToPage} disabled={props.isLoadingPage}>
+            Go
+          </button>
+          <button className="secondaryButton" onClick={props.onNextPage} disabled={!props.hasNextPage || props.isLoadingPage}>
+            Next
+          </button>
+        </div>
+      </div>
+
       <div className="galleryGrid">
         {props.history.map((detail) => {
           const output = detail.outputs[0];
@@ -1218,15 +1322,14 @@ function GalleryHistoryView(props: {
               key={detail.generation.id}
               className={props.selectedId === detail.generation.id ? "galleryCard selected" : "galleryCard"}
             >
-              <button className="galleryPreview" onClick={() => (output ? props.onPreview(detail) : props.onSelect(detail))}>
-                {thumbnail ? (
-                  <img src={thumbnail} alt="Generated output thumbnail" />
-                ) : (
-                  <span className={`galleryPlaceholder ${detail.generation.status}`}>
-                    {displayStatus(detail.generation.status)}
-                  </span>
-                )}
-              </button>
+              <GalleryThumbnail
+                detail={detail}
+                output={output}
+                thumbnail={thumbnail}
+                onSelect={props.onSelect}
+                onPreview={props.onPreview}
+                onVisible={props.onThumbnailVisible}
+              />
               <div className="galleryMeta">
                 <p className="galleryPrompt">{detail.generation.prompt || "Untitled prompt"}</p>
                 <div className="galleryStats">
@@ -1388,7 +1491,7 @@ function HistoryView(props: {
             <span className={`statusDot ${detail.generation.status}`} />
             <span className="historyText">
               <strong>{detail.generation.prompt || "Untitled prompt"}</strong>
-              <small>{detail.generation.model} · {displayStatus(detail.generation.status)} · {formatTime(detail.generation.createdAt)}</small>
+              <small>{detail.generation.providerName} · {detail.generation.model} · {displayStatus(detail.generation.status)} · {formatTime(detail.generation.createdAt)}</small>
             </span>
             <button
               className="historyRetryButton"
@@ -1664,7 +1767,7 @@ function Inspector(props: {
   detail: GenerationDetail | null;
   imageDataUrl: string;
   onOpen: () => void;
-  onReveal: () => void;
+  onUse: () => void;
   onRetry: () => void;
   onDelete: () => void;
 }) {
@@ -1684,6 +1787,8 @@ function Inspector(props: {
         <dl>
           <dt>Status</dt>
           <dd>{props.detail ? displayStatus(props.detail.generation.status) : "idle"}</dd>
+          <dt>Provider</dt>
+          <dd>{props.detail?.generation.providerName ?? "-"}</dd>
           <dt>Model</dt>
           <dd>{props.detail?.generation.model ?? "-"}</dd>
           <dt>Size</dt>
@@ -1707,8 +1812,8 @@ function Inspector(props: {
         <button className="secondaryButton" onClick={props.onOpen} disabled={!output}>
           Open
         </button>
-        <button className="secondaryButton" onClick={props.onReveal} disabled={!output}>
-          Reveal
+        <button className="secondaryButton" onClick={props.onUse} disabled={!props.detail}>
+          Use
         </button>
         <button className="secondaryButton" onClick={props.onRetry} disabled={!props.detail}>
           Retry
@@ -1823,6 +1928,56 @@ function errorMessage(err: unknown) {
 
 function knownSize(value: string) {
   return sizes.includes(value);
+}
+
+function GalleryThumbnail(props: {
+  detail: GenerationDetail;
+  output?: GenerationOutput;
+  thumbnail?: string;
+  onSelect: (detail: GenerationDetail) => void;
+  onPreview: (detail: GenerationDetail) => void;
+  onVisible: (detail: GenerationDetail) => void;
+}) {
+  const previewRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (props.thumbnail || !props.output) return;
+    const element = previewRef.current;
+    if (!element) return;
+
+    if (!("IntersectionObserver" in window)) {
+      props.onVisible(props.detail);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          props.onVisible(props.detail);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "240px 0px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [props.detail, props.onVisible, props.output, props.thumbnail]);
+
+  return (
+    <button
+      ref={previewRef}
+      className="galleryPreview"
+      onClick={() => (props.output ? props.onPreview(props.detail) : props.onSelect(props.detail))}
+    >
+      {props.thumbnail ? (
+        <img src={props.thumbnail} alt="Generated output thumbnail" loading="lazy" decoding="async" />
+      ) : (
+        <span className={`galleryPlaceholder ${props.detail.generation.status}`}>
+          {displayStatus(props.detail.generation.status)}
+        </span>
+      )}
+    </button>
+  );
 }
 
 function knownXaiAspectRatio(value: string) {

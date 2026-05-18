@@ -13,8 +13,8 @@ use crate::db;
 use crate::providers::openai;
 use crate::secrets;
 use crate::types::{
-    AppBootstrap, GenerateImageRequest, GenerationDetail, ListGenerationsRequest, ProviderProfile,
-    SaveProviderProfileRequest, StartedGeneration,
+    AppBootstrap, GenerateImageRequest, GenerationDetail, GenerationPage, ListGenerationsRequest,
+    ProviderProfile, SaveProviderProfileRequest, StartedGeneration,
 };
 
 static ID_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -79,9 +79,7 @@ pub fn save_provider_profile(
 }
 
 #[tauri::command]
-pub fn list_generations(
-    request: Option<ListGenerationsRequest>,
-) -> Result<Vec<GenerationDetail>, String> {
+pub fn list_generations(request: Option<ListGenerationsRequest>) -> Result<GenerationPage, String> {
     let request = request.unwrap_or(ListGenerationsRequest {
         query: None,
         limit: Some(40),
@@ -89,7 +87,11 @@ pub fn list_generations(
     });
     let limit = request.limit.unwrap_or(40).clamp(1, 200);
     let offset = request.offset.unwrap_or(0).max(0);
-    db::list_generation_details(request.query.as_deref(), limit, offset)
+    let query = request.query.as_deref();
+    Ok(GenerationPage {
+        items: db::list_generation_details(query, limit, offset)?,
+        total: db::count_generations(query)?,
+    })
 }
 
 #[tauri::command]

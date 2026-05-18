@@ -389,6 +389,36 @@ pub fn list_generation_details(
         .collect()
 }
 
+pub fn count_generations(query: Option<&str>) -> Result<i64, String> {
+    init_database()?;
+    let db = open()?;
+    if let Some(query) = query.filter(|value| !value.trim().is_empty()) {
+        let pattern = format!("%{}%", query.trim());
+        let mut stmt = db.prepare(
+            r#"
+            SELECT COUNT(*)
+            FROM generations
+            WHERE prompt LIKE ?1 OR model LIKE ?1 OR provider_name LIKE ?1
+            "#,
+        )?;
+        stmt.bind_text(1, &pattern)?;
+        if stmt.step()? {
+            return Ok(stmt.column_i64(0));
+        }
+    } else {
+        let mut stmt = db.prepare(
+            r#"
+            SELECT COUNT(*)
+            FROM generations
+            "#,
+        )?;
+        if stmt.step()? {
+            return Ok(stmt.column_i64(0));
+        }
+    }
+    Ok(0)
+}
+
 pub fn get_generation_detail(id: &str) -> Result<Option<GenerationDetail>, String> {
     init_database()?;
     let db = open()?;
