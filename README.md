@@ -21,7 +21,9 @@ A Tauri desktop workbench for generating images with OpenAI-compatible image API
 - Provider-oriented backend so additional providers, such as Google image models, can be added behind the same UI/history model.
 - Browse previous generations in a gallery-style History view, then reuse, retry, reveal, or delete a generation.
 - Retry a generation from History or the Generate inspector while preserving the saved request parameters and reference images.
-- Keep the Generate page sidebar fixed; its embedded History panel shows the latest 10 records and scrolls internally.
+- Keep the app chrome fixed while scrolling: the left rail and top provider/action bar stay visible.
+- Keep the Generate page embedded History panel lightweight with the latest 10 records and internal scrolling.
+- Browse the full History gallery with pagination, total counts, direct page jumps, provider labels, and lazy-loaded thumbnails.
 
 ## Architecture
 
@@ -74,6 +76,7 @@ The Windows installer is written to `src-tauri/target/release/bundle/nsis/Image 
 - Reusable input images are intentionally not deleted when a single generation is deleted. Add reference-counting or garbage collection before cleaning `images/inputs`.
 - Existing pre-dedup input images are not migrated automatically into `images/inputs`.
 - Multi-output generations are listed in detail records. The preview modal can still be improved with explicit output switching.
+- Full History now paginates instead of rendering the whole library, but gallery thumbnails still use original image payloads lazily rather than generated low-resolution thumbnail files.
 - Notification and tray behavior has been build-verified on Windows, but still needs manual OS-level validation for notification display and tray menu interaction.
 - API key storage is Keychain-backed on macOS. Non-macOS currently falls back to a local secrets JSON file and should be replaced before cross-platform release.
 - The app icon is a temporary placeholder and should be replaced before public distribution.

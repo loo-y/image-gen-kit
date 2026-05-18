@@ -1,5 +1,117 @@
 # Image Gen Kit 交接记录
 
+## 2026-05-19 History 分页、懒加载与顶部固定
+
+### 1. 本次会话目标 / 当前阶段目标
+
+本阶段目标是解决应用使用一段时间后的可用性退化：Generate 页顶部操作区会随滚动消失、History 只展示第一页导致旧记录“看起来丢失”、图库打开后会因为一次性加载大量图片而变卡、以及多 provider 场景下关键位置缺少 provider 信息。当前方案是长期方向上的第一阶段修复：把完整 History 改为真实分页并懒加载图片，Generate 页继续保留轻量最近记录视图。
+
+### 2. 当前仓库状态
+
+- 当前分支：`main`。
+- 当前远端：`origin git@github.com:loo-y/image-gen-kit.git`。
+- 当前最新提交：`f79507c Keep history usable as the library grows`，已推送到 `origin/main`。
+- 本阶段主要代码文件：`src/App.tsx`、`src/styles.css`、`src-tauri/src/commands.rs`、`src-tauri/src/db.rs`、`src-tauri/src/types.rs`。
+- 文档同步前工作区干净。
+- 最新 Windows NSIS 安装包路径：`src-tauri/target/release/bundle/nsis/Image Gen Kit_0.1.0_x64-setup.exe`。
+- 最近一次已验证 installer SHA256：`ECA3E80D1665273C04E98AB0908CB1F3B12F4A5CB816C6B9F32D0C30E1FE1F12`。
+
+### 3. 今天实际遇到的问题
+
+1. 顶部 provider / settings / tray / quit 整块区域会跟随页面滚动，长页面操作时需要滚回顶部。
+2. 完整 History 前端固定只请求第一页，之前最多 80 条；没有翻页时，旧记录不是丢失，而是根本没有继续查询。
+3. History 打开时会把一批图片直接读成 base64 data URL，图片多、分辨率高时 WebView 交互明显变钝。
+4. History 搜索每输入一个字符都会立刻发起刷新，增加无效查询和重渲染。
+5. 右侧 Inspector 和 Generate 中间 History 都缺少 provider 展示，多供应商切换后难以快速判断记录来源。
+6. 右侧 Inspector 的 `Reveal` 与用户当前工作流不匹配，用户希望直接 `Use` 回填记录。
+
+### 4. 原因判断与结论
+
+- 应用底层虽是 Rust，但 UI 仍运行在 Tauri WebView 中；前端一次性解码大量原图、反复跨桥传 base64、频繁刷新列表，都会造成可见卡顿。
+- `list_generations` 后端本来支持 `LIMIT/OFFSET`，真正的问题是前端没有分页 UI，也没有总数查询。
+- 完整 History 和 Generate 内嵌 History 应该承担不同职责：前者负责完整检索，后者只负责最近记录快速复用。
+- 第一阶段性能优化不需要重做存储模型；先做分页、懒加载、缓存和搜索防抖即可明显降低交互压力。
+- 后续如果要继续优化，真正的长期方案是生成小尺寸 thumbnail 文件，而不是长期依赖原图 data URL 做缩略图。
+
+### 5. 这次已经落地的修复
+
+- `src/styles.css`
+  - 把顶部 `topbar` 改成 fixed，左侧 rail 宽度抽成变量，workspace 增加顶部留白，保证固定顶部不会遮住正文。
+  - 增加 History 分页与跳页输入框样式。
+
+- `src/App.tsx`
+  - Generate 右侧 Inspector 把 `Reveal` 改为 `Use`，直接复用已有历史回填逻辑。
+  - Inspector 增加 `Provider` 字段；Generate 内嵌 History 也展示 `providerName`。
+  - 历史图库图片改为进入视口后再加载；已读图片用前端缓存复用，避免同一路径反复读取。
+  - History 搜索加入 180ms 防抖。
+  - 完整 History 拆成独立分页状态，单页 24 条，支持 `Previous` / `Next`、总条数、`Page X of Y`、直接输入页码跳转。
+
+- `src-tauri/src/types.rs`
+  - 新增 `GenerationPage`，用于同时返回分页 items 和 total。
+
+- `src-tauri/src/commands.rs`
+  - `list_generations` 从只返回数组改为返回 `GenerationPage`。
+
+- `src-tauri/src/db.rs`
+  - 新增 `count_generations()`，支持无查询词和带查询词两种总数统计。
+
+### 6. 已验证结果
+
+本阶段实际验证通过：
+
+- `cmd /c npm run build`
+- `cargo fmt --check`
+- `cargo check`
+- `cargo test`
+- `cmd /c npm run tauri -- build --ci --no-sign`
+
+未验证：
+
+- 未对超大真实 History 库做性能 profiling。
+- 未重新安装最新包后做完整人工 UI 回归。
+- 未实现真正的低分辨率 thumbnail 文件，因此 History 首次滚动时仍会按需加载原图数据。
+
+### 7. 踩过的坑 / 已否定方案 / 关键约束
+
+- 不要重新把完整 History 改回一次性渲染所有记录；这会把“旧记录可见”问题换回“页面卡顿”问题。
+- 不要在 History 打开时再次批量 hydrate 全部图片；懒加载是当前设计前提。
+- 不要只做 `limit` 而不提供总数；没有 total，页码和跳页都会变成前端猜测。
+- 不要把 Rust backend 的存在误解成 UI 一定流畅；WebView 前端的渲染与图片解码仍然需要单独优化。
+
+### 8. 接手后如何继续
+
+1. 先看 `src/App.tsx` 中 `refreshGalleryHistory()`、`GalleryThumbnail()`、`loadHistoryThumbnail()`，理解当前分页和懒加载行为。
+2. 再看 `src-tauri/src/commands.rs` 的 `list_generations()` 与 `src-tauri/src/db.rs` 的 `count_generations()`，确认 total 的来源。
+3. 本地先跑 `cmd /c npm run build`、`cargo test`、`cargo check`。
+4. 人工验证优先顺序：顶部固定、完整 History 翻页、页码跳转、搜索后页数重置、懒加载缩略图、Inspector `Use`、provider 展示。
+5. 如果用户继续反馈卡顿，优先做真正的 thumbnail 生成与读取，不要先堆更多 React 层补丁。
+
+### 9. 当前仍存在的问题 / 边界
+
+- History 仍未生成独立低分辨率缩略图；当前只是延迟加载原图 data URL。
+- 完整 History 还没有日期分组，用户已明确暂不需要。
+- Preview modal 仍未做多输出切换。
+- 最新安装包仍未签名。
+- 真实大库下的滚动性能尚未做量化。
+
+### 10. 最终想实现的产品目标
+
+最终目标仍是一个可长期使用的多供应商桌面图片工作台：历史库越大，应用越需要保持可检索、可追溯、可重试，而不是因为数据积累逐步变慢或“看起来丢记录”。本阶段已经把 History 从“固定第一页列表”推进到“可分页检索图库”，下一步应继续完成 thumbnail、更多人工回归和分发质量。
+
+### 11. 后续 TODO
+
+1. 为输出图生成独立 thumbnail 文件并优先用于 History。
+   - 目的：继续降低 WebView 解码原图的成本，改善大图库滚动体验。
+
+2. 对大 History 数据集做人工或脚本化性能验证。
+   - 目的：确认分页、懒加载、缓存后，实际交互延迟是否已满足使用要求。
+
+3. 安装最新 NSIS 包做完整 UI 回归。
+   - 目的：验证顶部 fixed、分页、跳页、provider 展示、Inspector `Use` 在真实安装态都正常。
+
+4. 继续完善多输出 Preview。
+   - 目的：当一次请求返回多张图时，Preview 里也能切换查看，而不是只在 Detail 中查看列表。
+
 ## 2026-05-13 xAI Grok provider、参数切换与 History Retry
 
 ### 1. 本次会话目标 / 当前阶段目标
